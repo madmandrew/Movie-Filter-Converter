@@ -1,0 +1,17 @@
+.incident {
+  display: flex;
+  flex-direction: row;
+  text-align: left;
+  margin: .2rem !important;
+
+  div {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  p {
+    margin-top: 0;
+    margin-bottom: 0;
+  }
+}

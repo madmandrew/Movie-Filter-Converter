@@ -1,0 +1,22 @@
+.container {
+    display: flex;
+    flex-direction: row;
+
+    .container-column {
+        display: flex;
+        flex-direction: column;
+        margin: .5rem;
+    }
+
+    .json-style {
+        background-color: white;
+        width: 500px;
+        height: 500px;
+        overflow: auto;
+        text-align: left;
+    }
+
+    .json-text-input {
+        height: 100px;
+    }
+}
