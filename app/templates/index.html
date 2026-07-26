@@ -77,17 +77,62 @@
 
   <!-- ----------------------------------------------------------- tag-sets -->
   <section id="view-tagsets" class="view hidden">
-    <p class="muted">
-      This server cannot reach api.vidangel.com — it needs your logged-in session. Fetch
-      <code>https://api.vidangel.com/api/bff/tag-sets/&lt;id&gt;/</code> in your browser
-      and paste the JSON here; it is cached for reuse.
-    </p>
-    <div class="toolbar">
-      <input id="hint" placeholder="title hint, e.g. Community S01E02">
-    </div>
-    <textarea id="payload" rows="10" placeholder="paste tag-set JSON…"></textarea>
-    <button id="savetagset">Save tag-set</button>
-    <div id="tagsetmsg"></div>
+    <fieldset><legend>VidAngel auth token</legend>
+      <p class="muted">
+        Saved once and reused for every fetch. Get it from your browser while logged in to
+        VidAngel: DevTools → Network → any <code>api.vidangel.com</code> request → the
+        <code>Authorization</code> header. Paste the whole header or just the token.
+      </p>
+      <div class="toolbar">
+        <input id="vatoken" type="password" placeholder="Bearer eyJ… (paste here)"
+               style="flex:1 1 26rem" autocomplete="off" spellcheck="false">
+        <button id="vasave">Save token</button>
+        <button id="vaclear" class="secondary">Clear</button>
+        <span id="vastatus" class="muted"></span>
+      </div>
+      <details>
+        <summary class="muted">API endpoint (change only if VidAngel moves it)</summary>
+        <div class="toolbar" style="margin-top:.5rem">
+          <input id="vaapi" style="flex:1 1 30rem" spellcheck="false">
+          <button id="vaapisave" class="secondary">Save endpoint</button>
+        </div>
+      </details>
+    </fieldset>
+
+    <fieldset><legend>Fetch by URL</legend>
+      <p class="muted">
+        Paste a VidAngel URL — the tag-set endpoint, a watch page, or just the numeric id.
+        Requires this server to have outbound internet access.
+      </p>
+      <div class="toolbar">
+        <input id="vaurl" placeholder="https://www.vidangel.com/… or 46025"
+               style="flex:1 1 26rem" spellcheck="false">
+        <input id="vahint" placeholder="title hint, e.g. Community S01E02"
+               style="flex:1 1 16rem">
+        <button id="vafetch">Fetch</button>
+      </div>
+      <div id="vafetchmsg"></div>
+    </fieldset>
+
+    <fieldset><legend>Or paste JSON</legend>
+      <p class="muted">
+        Always works, no token or server internet access needed. Open
+        <code>https://api.vidangel.com/api/bff/tag-sets/&lt;id&gt;/</code> in your browser
+        and copy the response.
+      </p>
+      <div class="toolbar">
+        <input id="hint" placeholder="title hint, e.g. Community S01E02">
+      </div>
+      <textarea id="payload" rows="8" placeholder="paste tag-set JSON…"></textarea>
+      <button id="savetagset">Save tag-set</button>
+      <div id="tagsetmsg"></div>
+    </fieldset>
+
+    <fieldset><legend>Cached tag-sets</legend>
+      <table id="tslist"><thead><tr>
+        <th>ID</th><th>Title hint</th><th>Runtime</th><th>Added</th><th></th>
+      </tr></thead><tbody></tbody></table>
+    </fieldset>
   </section>
 
   <!-- ----------------------------------------------------------- settings -->

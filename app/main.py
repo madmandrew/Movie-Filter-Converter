@@ -25,6 +25,7 @@ from pydantic import BaseModel  # noqa: E402
 import db  # noqa: E402
 import jobs  # noqa: E402
 import library  # noqa: E402
+import vidangel_client as vac  # noqa: E402
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -153,6 +154,111 @@ def _looks_like(hint: str, name: str) -> bool:
 class TagSetIn(BaseModel):
     payload: str
     title_hint: str | None = None
+
+
+class VidAngelAuthIn(BaseModel):
+    token: str | None = None
+    api_template: str | None = None
+
+
+@app.get("/api/vidangel/auth")
+def api_va_auth():
+    """Whether a token is saved — never the token itself."""
+    token = db.get_setting("vidangel_token")
+    return {
+        "has_token": bool(token),
+        "token_hint": (f"{token[:4]}…{token[-2:]}" if token and len(token) > 6 else None),
+        "api_template": db.get_setting("vidangel_api", vac.DEFAULT_API),
+    }
+
+
+@app.post("/api/vidangel/auth")
+def api_va_set_auth(body: VidAngelAuthIn):
+    if body.token is not None:
+        tok = body.token.strip()
+        # Tolerate a pasted "Authorization: Bearer xyz" header or a raw bearer prefix.
+        for prefix in ("authorization:", "bearer ", "token ", "jwt "):
+            if tok.lower().startswith(prefix):
+                tok = tok[len(prefix):].strip()
+        db.set_setting("vidangel_token", tok or None)
+    if body.api_template is not None:
+        tmpl = body.api_template.strip() or vac.DEFAULT_API
+        if "{id}" not in tmpl:
+            raise HTTPException(400, "api_template must contain {id}")
+        db.set_setting("vidangel_api", tmpl)
+    return api_va_auth()
+
+
+@app.delete("/api/vidangel/auth")
+def api_va_clear_auth():
+    db.set_setting("vidangel_token", None)
+    return {"ok": True}
+
+
+class FetchIn(BaseModel):
+    url: str
+    title_hint: str | None = None
+    token: str | None = None      # one-off override; not saved unless save_token
+    save_token: bool = False
+
+
+@app.post("/api/vidangel/fetch")
+def api_va_fetch(body: FetchIn):
+    """Fetch a tag-set from VidAngel by URL (or bare id) and cache it.
+
+    Requires outbound internet access from the server. If that is unavailable, or the
+    API has changed shape, the error says so and pasting JSON still works.
+    """
+    import vidangel
+
+    token = (body.token or "").strip() or db.get_setting("vidangel_token")
+    if not token:
+        raise HTTPException(400, "no VidAngel token saved — add one first, or paste JSON")
+
+    template = db.get_setting("vidangel_api", vac.DEFAULT_API)
+    try:
+        tag_set_id, raw = vac.fetch_tagset(body.url, token, api_template=template)
+    except vac.FetchError as exc:
+        raise HTTPException(502, str(exc))
+
+    try:
+        ts = vidangel.parse(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(502, f"fetched a response but could not parse it as a "
+                                 f"tag-set: {exc}")
+
+    if body.save_token and body.token:
+        db.set_setting("vidangel_token", token)
+
+    with db.tx() as c:
+        c.execute(
+            """INSERT INTO tagsets(tag_set_id, work_id, title_hint, runtime, payload,
+                                   added_at)
+               VALUES (?,?,?,?,?,datetime('now'))
+               ON CONFLICT(tag_set_id) DO UPDATE SET
+                   payload=excluded.payload, title_hint=excluded.title_hint,
+                   runtime=excluded.runtime""",
+            (ts.tag_set_id, ts.work_id, body.title_hint, ts.runtime_unaltered, raw),
+        )
+    return {"tag_set_id": ts.tag_set_id, "work_id": ts.work_id,
+            "incidents": len(ts.incidents), "enabled": len(ts.enabled()),
+            "runtime": ts.runtime_unaltered, "fetched_id": tag_set_id}
+
+
+@app.get("/api/tagsets")
+def api_list_tagsets():
+    rows = db.connect().execute(
+        "SELECT tag_set_id, work_id, title_hint, runtime, added_at FROM tagsets "
+        "ORDER BY added_at DESC"
+    ).fetchall()
+    return {"tagsets": [dict(r) for r in rows]}
+
+
+@app.delete("/api/tagsets/{tag_set_id}")
+def api_del_tagset(tag_set_id: int):
+    with db.tx() as c:
+        c.execute("DELETE FROM tagsets WHERE tag_set_id=?", (tag_set_id,))
+    return {"ok": True}
 
 
 @app.post("/api/tagsets")

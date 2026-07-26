@@ -34,6 +34,7 @@ $$('.tab').forEach((b) => b.addEventListener('click', () => {
   if (b.dataset.view === 'runs') loadRuns();
   if (b.dataset.view === 'words') loadWords();
   if (b.dataset.view === 'settings') loadSettings();
+  if (b.dataset.view === 'tagsets') loadTagsets();
 }));
 
 /* ---------------------------------------------------------------- library */
@@ -378,6 +379,79 @@ $('#addword').addEventListener('click', async () => {
 });
 
 /* --------------------------------------------------------------- tag-sets */
+async function loadTagsets() {
+  const a = await api('/api/vidangel/auth');
+  $('#vastatus').innerHTML = a.has_token
+    ? `<span class="pill ok">token saved (${esc(a.token_hint)})</span>`
+    : '<span class="pill warn">no token saved</span>';
+  $('#vaapi').value = a.api_template;
+
+  const d = await api('/api/tagsets');
+  $('#tslist tbody').innerHTML = d.tagsets.map((t) => `<tr>
+      <td class="num">${t.tag_set_id}</td>
+      <td>${esc(t.title_hint || '—')}</td>
+      <td class="num muted">${t.runtime ? tc(t.runtime) : '—'}</td>
+      <td class="muted">${esc((t.added_at || '').replace('T', ' '))}</td>
+      <td><button class="secondary tsdel" data-id="${t.tag_set_id}">Remove</button></td>
+    </tr>`).join('')
+    || '<tr><td colspan="5" class="muted">None cached yet.</td></tr>';
+
+  $$('.tsdel').forEach((b) => b.addEventListener('click', async () => {
+    await api(`/api/tagsets/${b.dataset.id}`, { method: 'DELETE' });
+    loadTagsets();
+  }));
+}
+
+$('#vasave').addEventListener('click', async () => {
+  const token = $('#vatoken').value.trim();
+  if (!token) return;
+  try {
+    await postJSON('/api/vidangel/auth', { token });
+    $('#vatoken').value = '';
+    await loadTagsets();
+  } catch (e) {
+    $('#vastatus').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+  }
+});
+
+$('#vaclear').addEventListener('click', async () => {
+  await api('/api/vidangel/auth', { method: 'DELETE' });
+  loadTagsets();
+});
+
+$('#vaapisave').addEventListener('click', async () => {
+  try {
+    await postJSON('/api/vidangel/auth', { api_template: $('#vaapi').value.trim() });
+    $('#vastatus').innerHTML = '<span class="pill ok">endpoint saved</span>';
+  } catch (e) {
+    $('#vastatus').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+  }
+});
+
+$('#vafetch').addEventListener('click', async (e) => {
+  const url = $('#vaurl').value.trim();
+  if (!url) return;
+  e.target.disabled = true;
+  $('#vafetchmsg').innerHTML = '<span class="muted">fetching…</span>';
+  try {
+    const r = await postJSON('/api/vidangel/fetch', {
+      url, title_hint: $('#vahint').value.trim() || null,
+    });
+    $('#vafetchmsg').innerHTML = `<span class="pill ok">fetched #${r.tag_set_id}:
+      ${r.incidents} incidents, ${r.enabled} pre-enabled, runtime ${r.runtime}s</span>`;
+    $('#vaurl').value = '';
+    await loadTagsets();
+  } catch (err) {
+    // Fetch failures are expected to be informative: expired token, no outbound
+    // access, or a changed API shape all read differently.
+    $('#vafetchmsg').innerHTML = `<div class="pill bad" style="white-space:normal;
+      display:block;padding:.5rem">${esc(err.message)}</div>
+      <p class="muted">Pasting the JSON below always works.</p>`;
+  } finally {
+    e.target.disabled = false;
+  }
+});
+
 $('#savetagset').addEventListener('click', async () => {
   const payload = $('#payload').value.trim();
   if (!payload) return;
@@ -387,6 +461,7 @@ $('#savetagset').addEventListener('click', async () => {
       `<span class="pill ok">saved #${r.tag_set_id}: ${r.incidents} incidents,
        ${r.enabled} pre-enabled, runtime ${r.runtime}s</span>`;
     $('#payload').value = '';
+    await loadTagsets();
   } catch (e) {
     $('#tagsetmsg').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
   }
