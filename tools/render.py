@@ -148,9 +148,28 @@ def render(
     return _render_with_cuts(src, dest, mutes, video_cuts, quality)
 
 
+def audio_track_count(src: str) -> int:
+    out = subprocess.run(
+        [_tool("ffprobe"), "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=index", "-of", "csv=p=0", "--", src],
+        capture_output=True, text=True,
+    ).stdout
+    return len([l for l in out.splitlines() if l.strip()])
+
+
 def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
-    """No video cuts: prefer the byte-exact splice path."""
-    if quality == "splice":
+    """No video cuts: prefer the byte-exact splice path.
+
+    Multi-track files are common in this library (one movie has 7 audio tracks:
+    commentary, other languages, an AC3 compatibility track). Every track must be
+    filtered — mapping only `a:0` would leave an *unfiltered* track in the output that a
+    player could select, defeating the whole point. The splice path handles one stream,
+    so multi-track files take the filter-graph path where each track gets its own
+    `volume` filter.
+    """
+    n_audio = audio_track_count(src)
+
+    if quality == "splice" and n_audio == 1:
         import splice as sp
 
         info = sp.probe(src)
@@ -164,7 +183,7 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
                   "-c", "copy", "-shortest", dest])
             total = stats["bytes_reencoded"] + stats["bytes_copied"]
             return {
-                "mode": "splice", "audio_codec": info.codec,
+                "mode": "splice", "audio_codec": info.codec, "audio_tracks": 1,
                 "bytes_reencoded": stats["bytes_reencoded"],
                 "pct_reencoded": round(100.0 * stats["bytes_reencoded"] / max(1, total), 3),
                 "summary": (f"splice, {stats['bytes_reencoded']:,} of {total:,} bytes "
@@ -174,23 +193,68 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
 
     codec_args = _full_encode_args(src, quality)
     expr = "+".join(f"between(t,{s:.4f},{e:.4f})" for s, e in spans)
-    _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src,
-          "-af", f"volume=0:enable='{expr}'",
-          "-c:v", "copy", *codec_args, "-c:s", "copy", "-map", "0", dest])
-    return {"mode": quality, "summary": f"full audio re-encode ({quality})"}
+
+    if n_audio <= 1:
+        _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src,
+              "-af", f"volume=0:enable='{expr}'",
+              "-c:v", "copy", *codec_args, "-c:s", "copy", "-map", "0", dest])
+        note = ""
+    else:
+        # One filter chain per audio stream, so no track escapes filtering.
+        chains = ";".join(
+            f"[0:a:{i}]volume=0:enable='{expr}'[fa{i}]" for i in range(n_audio)
+        )
+        maps: list[str] = ["-map", "0:v"]
+        for i in range(n_audio):
+            maps += ["-map", f"[fa{i}]"]
+        maps += ["-map", "0:s?"]
+        _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src,
+              "-filter_complex", chains, *maps,
+              "-c:v", "copy", *codec_args, "-c:s", "copy", dest])
+        note = f" ({n_audio} audio tracks, all filtered)"
+
+    return {"mode": quality, "audio_tracks": n_audio,
+            "summary": f"full audio re-encode ({quality}){note}"}
+
+
+def _audio_streams(src: str) -> list[dict]:
+    """Per-stream codec/bitrate for every audio track."""
+    out = subprocess.run(
+        [_tool("ffprobe"), "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=index,codec_name,profile,bit_rate,channels",
+         "-of", "json", "--", src],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    import json as _json
+
+    return _json.loads(out).get("streams", [])
 
 
 def _full_encode_args(src: str, quality: str) -> list[str]:
-    """Audio args for a whole-track re-encode, respecting the lossless-source rule."""
+    """Audio args for a whole-track re-encode, respecting the lossless-source rule.
+
+    Emits **per-stream** codec options. A single `-c:a` would apply one codec to every
+    track, which silently converted a stereo AC3 commentary track into DTS in testing.
+    Each track keeps its own codec and bitrate.
+    """
     import splice as sp
 
-    info = sp.probe(src)
-    ok, _reason = sp.can_splice(info)
-    if quality == "lossless" or not ok:
-        return ["-c:a", "flac", "-compression_level", "8"]
-    args = ["-strict", "-2", "-c:a", sp.SPLICEABLE[info.codec]]
-    if info.bit_rate:
-        args += ["-b:a", info.bit_rate]
+    streams = _audio_streams(src) or [{}]
+    args: list[str] = ["-strict", "-2"]
+
+    for i, st in enumerate(streams):
+        codec = (st.get("codec_name") or "").lower()
+        profile = (st.get("profile") or "").lower()
+        lossless = codec in ("truehd", "mlp") or any(
+            k in profile for k in sp._NO_ENCODER
+        )
+        if quality == "lossless" or lossless or codec not in sp.SPLICEABLE:
+            args += [f"-c:a:{i}", "flac", f"-compression_level:a:{i}", "8"]
+            continue
+        args += [f"-c:a:{i}", sp.SPLICEABLE[codec]]
+        br = st.get("bit_rate")
+        if br and str(br).isdigit():
+            args += [f"-b:a:{i}", str(br)]
     return args
 
 
@@ -208,15 +272,27 @@ def _render_with_cuts(src, dest, mutes, cuts, quality) -> dict:
     shifted = shift_mutes(mutes, cuts)
     mute_expr = "+".join(f"between(t,{s:.4f},{e:.4f})" for _r, s, e in shifted)
 
-    vf = f"select='{keep}',setpts=N/FRAME_RATE/TB"
-    af = f"aselect='{keep}',asetpts=N/SR/TB"
+    # Mutes are applied BEFORE the cut selection, in input-timeline coordinates, and the
+    # `keep` selection then removes frames. Applying them after would require the shifted
+    # times — which is what `shift_mutes` computes for reporting, but doing it in one
+    # chain is simpler and avoids a second timeline translation.
+    n_audio = audio_track_count(src)
+    a_chain = f"aselect='{keep}',asetpts=N/SR/TB"
     if mute_expr:
-        af += f",volume=0:enable='{mute_expr}'"
+        a_chain = f"volume=0:enable='{mute_expr}'," + a_chain
+
+    chains = [f"[0:v]select='{keep}',setpts=N/FRAME_RATE/TB[fv]"]
+    maps = ["-map", "[fv]"]
+    for i in range(max(1, n_audio)):
+        chains.append(f"[0:a:{i}]{a_chain}[fa{i}]")
+        maps += ["-map", f"[fa{i}]"]
+    maps += ["-map", "0:s?"]
 
     codec_args = _full_encode_args(src, quality)
     venc = _video_encoder(src)
     _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src,
-          "-vf", vf, "-af", af, *venc, *codec_args, dest])
+          "-filter_complex", ";".join(chains), *maps,
+          *venc, *codec_args, "-c:s", "copy", dest])
 
     removed = sum(c["end"] - c["start"] for c in cuts)
     return {
