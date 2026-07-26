@@ -1,0 +1,656 @@
+{
+    "id": "57b5ab87-e7f4-4547-8257-2e5264b6431d",
+    "work_id": 679093,
+    "tag_set_id": 46025,
+    "profile_id": 335429,
+    "override_global": true,
+    "runtime_unaltered": 1282,
+    "tag_categories": [
+        {
+            "id": 1,
+            "key": "language",
+            "display_title": "Language",
+            "default_type": "audio",
+            "parent_id": null,
+            "is_symlink": false,
+            "tags": [],
+            "child_categories": [
+                {
+                    "id": 18,
+                    "key": "profanity",
+                    "display_title": "Profanity",
+                    "default_type": "audio",
+                    "parent_id": 1,
+                    "is_symlink": false,
+                    "tags": [],
+                    "child_categories": [
+                        {
+                            "id": 53,
+                            "key": "ass",
+                            "display_title": "*ss",
+                            "default_type": "audio",
+                            "parent_id": 18,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920545,
+                                    "ref_id": "1947662",
+                                    "tag_set_id": 46025,
+                                    "category_id": 53,
+                                    "description": "*ss",
+                                    "type": "audio",
+                                    "start_approx": 576,
+                                    "end_approx": 576,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        },
+                        {
+                            "id": 60,
+                            "key": "damn",
+                            "display_title": "d*mn",
+                            "default_type": "audio",
+                            "parent_id": 18,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920555,
+                                    "ref_id": "1947685",
+                                    "tag_set_id": 46025,
+                                    "category_id": 60,
+                                    "description": "d*mn",
+                                    "type": "audio",
+                                    "start_approx": 960,
+                                    "end_approx": 960,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        },
+                        {
+                            "id": 118,
+                            "key": "douche",
+                            "display_title": "do*che",
+                            "default_type": "audio",
+                            "parent_id": 18,
+                            "is_symlink": true,
+                            "tags": [
+                                {
+                                    "id": 2920541,
+                                    "ref_id": "1947652",
+                                    "tag_set_id": 46025,
+                                    "category_id": 118,
+                                    "description": "d**ch*",
+                                    "type": "audio",
+                                    "start_approx": 234,
+                                    "end_approx": 234,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "primary_parent_id": 22,
+                            "primary_parent_title": "Sexual Reference",
+                            "locked": false
+                        },
+                        {
+                            "id": 62,
+                            "key": "hell",
+                            "display_title": "h*ll",
+                            "default_type": "audio",
+                            "parent_id": 18,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920559,
+                                    "ref_id": "1948557",
+                                    "tag_set_id": 46025,
+                                    "category_id": 62,
+                                    "description": "h*ll",
+                                    "type": "audio",
+                                    "start_approx": 312,
+                                    "end_approx": 312,
+                                    "locked": false
+                                },
+                                {
+                                    "id": 2920547,
+                                    "ref_id": "1947667",
+                                    "tag_set_id": 46025,
+                                    "category_id": 62,
+                                    "description": "h*ll",
+                                    "type": "audio",
+                                    "start_approx": 594,
+                                    "end_approx": 594,
+                                    "locked": false
+                                },
+                                {
+                                    "id": 2920554,
+                                    "ref_id": "1947684",
+                                    "tag_set_id": 46025,
+                                    "category_id": 62,
+                                    "description": "h*ll",
+                                    "type": "audio",
+                                    "start_approx": 930,
+                                    "end_approx": 930,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        }
+                    ],
+                    "locked": false
+                },
+                {
+                    "id": 20,
+                    "key": "blasphemy",
+                    "display_title": "Blasphemy",
+                    "default_type": "audio",
+                    "parent_id": 1,
+                    "is_symlink": false,
+                    "tags": [],
+                    "child_categories": [
+                        {
+                            "id": 81,
+                            "key": "god",
+                            "display_title": "G*d",
+                            "default_type": "audio",
+                            "parent_id": 20,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920548,
+                                    "ref_id": "1947668",
+                                    "tag_set_id": 46025,
+                                    "category_id": 81,
+                                    "description": "G*d",
+                                    "type": "audio",
+                                    "start_approx": 618,
+                                    "end_approx": 618,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        }
+                    ],
+                    "locked": false
+                },
+                {
+                    "id": 23,
+                    "key": "language_racial",
+                    "display_title": "Racial & Bigoted Slurs",
+                    "default_type": "audio",
+                    "parent_id": 1,
+                    "is_symlink": false,
+                    "tags": [],
+                    "child_categories": [
+                        {
+                            "id": 101,
+                            "key": "other_racial",
+                            "display_title": "other",
+                            "default_type": "audio",
+                            "parent_id": 23,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920558,
+                                    "ref_id": "1948548",
+                                    "tag_set_id": 46025,
+                                    "category_id": 101,
+                                    "description": "A man uses an insulting term for mentally handicapped people.",
+                                    "type": "audio",
+                                    "start_approx": 84,
+                                    "end_approx": 84,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        }
+                    ],
+                    "locked": false
+                },
+                {
+                    "id": 21,
+                    "key": "language_childish",
+                    "display_title": "Childish Language",
+                    "default_type": "audio",
+                    "parent_id": 1,
+                    "is_symlink": false,
+                    "tags": [],
+                    "child_categories": [
+                        {
+                            "id": 89,
+                            "key": "other_childish",
+                            "display_title": "other",
+                            "default_type": "audio",
+                            "parent_id": 21,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920542,
+                                    "ref_id": "1947653",
+                                    "tag_set_id": 46025,
+                                    "category_id": 89,
+                                    "description": "A man uses a slang term for male genitalia.",
+                                    "type": "audiovisual",
+                                    "start_approx": 270,
+                                    "end_approx": 276,
+                                    "locked": false
+                                },
+                                {
+                                    "id": 2920550,
+                                    "ref_id": "1947678",
+                                    "tag_set_id": 46025,
+                                    "category_id": 89,
+                                    "description": "A man references male genitalia with a slang term.",
+                                    "type": "audio",
+                                    "start_approx": 792,
+                                    "end_approx": 792,
+                                    "locked": false
+                                },
+                                {
+                                    "id": 2920560,
+                                    "ref_id": "1948626",
+                                    "tag_set_id": 46025,
+                                    "category_id": 89,
+                                    "description": "A man references what another man told him about female genitalia.",
+                                    "type": "audio",
+                                    "start_approx": 990,
+                                    "end_approx": 996,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        }
+                    ],
+                    "locked": false
+                },
+                {
+                    "id": 22,
+                    "key": "language_sexual",
+                    "display_title": "Sexual Reference",
+                    "default_type": "audio",
+                    "parent_id": 1,
+                    "is_symlink": false,
+                    "tags": [],
+                    "child_categories": [
+                        {
+                            "id": 118,
+                            "key": "douche",
+                            "display_title": "do*che",
+                            "default_type": "audio",
+                            "parent_id": 22,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920541,
+                                    "ref_id": "1947652",
+                                    "tag_set_id": 46025,
+                                    "category_id": 118,
+                                    "description": "d**ch*",
+                                    "type": "audio",
+                                    "start_approx": 234,
+                                    "end_approx": 234,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        },
+                        {
+                            "id": 150,
+                            "key": "other_sexual",
+                            "display_title": "other",
+                            "default_type": "audio",
+                            "parent_id": 22,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920543,
+                                    "ref_id": "1947655",
+                                    "tag_set_id": 46025,
+                                    "category_id": 150,
+                                    "description": "A man goes into detail about his virility.",
+                                    "type": "audiovisual",
+                                    "start_approx": 528,
+                                    "end_approx": 534,
+                                    "locked": false
+                                },
+                                {
+                                    "id": 2920549,
+                                    "ref_id": "1947674",
+                                    "tag_set_id": 46025,
+                                    "category_id": 150,
+                                    "description": "A man makes a sexual reference about women.",
+                                    "type": "audiovisual",
+                                    "start_approx": 744,
+                                    "end_approx": 750,
+                                    "locked": false
+                                },
+                                {
+                                    "id": 2920556,
+                                    "ref_id": "1947686",
+                                    "tag_set_id": 46025,
+                                    "category_id": 150,
+                                    "description": "A woman makes a reference to sex.",
+                                    "type": "audio",
+                                    "start_approx": 1200,
+                                    "end_approx": 1200,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        }
+                    ],
+                    "locked": false
+                }
+            ],
+            "locked": false
+        },
+        {
+            "id": 6,
+            "key": "sex_any",
+            "display_title": "Sex",
+            "default_type": "audiovisual",
+            "parent_id": null,
+            "is_symlink": false,
+            "tags": [],
+            "child_categories": [
+                {
+                    "id": 22,
+                    "key": "language_sexual",
+                    "display_title": "Sexual Reference",
+                    "default_type": "audio",
+                    "parent_id": 6,
+                    "is_symlink": true,
+                    "tags": [],
+                    "child_categories": [
+                        {
+                            "id": 118,
+                            "key": "douche",
+                            "display_title": "do*che",
+                            "default_type": "audio",
+                            "parent_id": 22,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920541,
+                                    "ref_id": "1947652",
+                                    "tag_set_id": 46025,
+                                    "category_id": 118,
+                                    "description": "d**ch*",
+                                    "type": "audio",
+                                    "start_approx": 234,
+                                    "end_approx": 234,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        },
+                        {
+                            "id": 150,
+                            "key": "other_sexual",
+                            "display_title": "other",
+                            "default_type": "audio",
+                            "parent_id": 22,
+                            "is_symlink": false,
+                            "tags": [
+                                {
+                                    "id": 2920543,
+                                    "ref_id": "1947655",
+                                    "tag_set_id": 46025,
+                                    "category_id": 150,
+                                    "description": "A man goes into detail about his virility.",
+                                    "type": "audiovisual",
+                                    "start_approx": 528,
+                                    "end_approx": 534,
+                                    "locked": false
+                                },
+                                {
+                                    "id": 2920549,
+                                    "ref_id": "1947674",
+                                    "tag_set_id": 46025,
+                                    "category_id": 150,
+                                    "description": "A man makes a sexual reference about women.",
+                                    "type": "audiovisual",
+                                    "start_approx": 744,
+                                    "end_approx": 750,
+                                    "locked": false
+                                },
+                                {
+                                    "id": 2920556,
+                                    "ref_id": "1947686",
+                                    "tag_set_id": 46025,
+                                    "category_id": 150,
+                                    "description": "A woman makes a reference to sex.",
+                                    "type": "audio",
+                                    "start_approx": 1200,
+                                    "end_approx": 1200,
+                                    "locked": false
+                                }
+                            ],
+                            "child_categories": [],
+                            "locked": false
+                        }
+                    ],
+                    "primary_parent_id": 1,
+                    "primary_parent_title": "Language",
+                    "locked": false
+                }
+            ],
+            "locked": false
+        },
+        {
+            "id": 4,
+            "key": "alcohol_or_drug_use",
+            "display_title": "Drugs & Alcohol",
+            "default_type": "audiovisual",
+            "parent_id": null,
+            "is_symlink": false,
+            "tags": [],
+            "child_categories": [
+                {
+                    "id": 11,
+                    "key": "drugs_legal",
+                    "display_title": "Legal Usage",
+                    "default_type": "audiovisual",
+                    "parent_id": 4,
+                    "is_symlink": false,
+                    "tags": [
+                        {
+                            "id": 2920544,
+                            "ref_id": "1947659",
+                            "tag_set_id": 46025,
+                            "category_id": 11,
+                            "description": "Two men drink alcohol.",
+                            "type": "audiovisual",
+                            "start_approx": 570,
+                            "end_approx": 576,
+                            "locked": false
+                        },
+                        {
+                            "id": 2920546,
+                            "ref_id": "1947666",
+                            "tag_set_id": 46025,
+                            "category_id": 11,
+                            "description": "Two men take drinks of alcohol.",
+                            "type": "audiovisual",
+                            "start_approx": 588,
+                            "end_approx": 594,
+                            "locked": false
+                        },
+                        {
+                            "id": 2920551,
+                            "ref_id": "1947681",
+                            "tag_set_id": 46025,
+                            "category_id": 11,
+                            "description": "A man drinks alcohol.",
+                            "type": "audiovisual",
+                            "start_approx": 822,
+                            "end_approx": 822,
+                            "locked": false
+                        }
+                    ],
+                    "child_categories": [],
+                    "locked": false
+                },
+                {
+                    "id": 10,
+                    "key": "drugs_implied",
+                    "display_title": "Implied Usage",
+                    "default_type": "audiovisual",
+                    "parent_id": 4,
+                    "is_symlink": false,
+                    "tags": [
+                        {
+                            "id": 2920539,
+                            "ref_id": "1947649",
+                            "tag_set_id": 46025,
+                            "category_id": 10,
+                            "description": "A man mentions marijuana.",
+                            "type": "audiovisual",
+                            "start_approx": 18,
+                            "end_approx": 24,
+                            "locked": false
+                        },
+                        {
+                            "id": 2920561,
+                            "ref_id": "1948635",
+                            "tag_set_id": 46025,
+                            "category_id": 10,
+                            "description": "Lyrics are seen on screen as a teenage boy raps about beer in Spanish.",
+                            "type": "audiovisual",
+                            "start_approx": 1254,
+                            "end_approx": 1260,
+                            "locked": false
+                        }
+                    ],
+                    "child_categories": [],
+                    "locked": false
+                }
+            ],
+            "locked": false
+        },
+        {
+            "id": 27,
+            "key": "human_functions",
+            "display_title": "Medical & Body Process",
+            "default_type": "audiovisual",
+            "parent_id": null,
+            "is_symlink": false,
+            "tags": [],
+            "child_categories": [
+                {
+                    "id": 29,
+                    "key": "life_events",
+                    "display_title": "Life Events",
+                    "default_type": "audiovisual",
+                    "parent_id": 27,
+                    "is_symlink": false,
+                    "tags": [
+                        {
+                            "id": 2920552,
+                            "ref_id": "1947682",
+                            "tag_set_id": 46025,
+                            "category_id": 29,
+                            "description": "A man mentions another man's reproductive fluid.",
+                            "type": "audio",
+                            "start_approx": 930,
+                            "end_approx": 930,
+                            "locked": false
+                        },
+                        {
+                            "id": 2920553,
+                            "ref_id": "1947683",
+                            "tag_set_id": 46025,
+                            "category_id": 29,
+                            "description": "A man mentions male reproductive fluid.",
+                            "type": "audio",
+                            "start_approx": 930,
+                            "end_approx": 930,
+                            "locked": false
+                        }
+                    ],
+                    "child_categories": [],
+                    "locked": false
+                }
+            ],
+            "locked": false
+        },
+        {
+            "id": 24,
+            "key": "credits",
+            "display_title": "Credits & Extras",
+            "default_type": "audiovisual",
+            "parent_id": null,
+            "is_symlink": false,
+            "tags": [],
+            "child_categories": [
+                {
+                    "id": 33,
+                    "key": "opening_credits",
+                    "display_title": "Opening Credits",
+                    "default_type": "audiovisual",
+                    "parent_id": 24,
+                    "is_symlink": false,
+                    "tags": [
+                        {
+                            "id": 2920540,
+                            "ref_id": "1947651",
+                            "tag_set_id": 46025,
+                            "category_id": 33,
+                            "description": "Opening Credits",
+                            "type": "audiovisual",
+                            "start_approx": 186,
+                            "end_approx": 210,
+                            "locked": false
+                        }
+                    ],
+                    "child_categories": [],
+                    "locked": false
+                },
+                {
+                    "id": 34,
+                    "key": "closing_credits",
+                    "display_title": "Closing Credits",
+                    "default_type": "audiovisual",
+                    "parent_id": 24,
+                    "is_symlink": false,
+                    "tags": [
+                        {
+                            "id": 2920557,
+                            "ref_id": "1947689",
+                            "tag_set_id": 46025,
+                            "category_id": 34,
+                            "description": "Closing Credits",
+                            "type": "audiovisual",
+                            "start_approx": 1272,
+                            "end_approx": 1278,
+                            "locked": false
+                        }
+                    ],
+                    "child_categories": [],
+                    "locked": false
+                }
+            ],
+            "locked": false
+        }
+    ],
+    "enabled_tags": [
+        "1947667",
+        "1948557",
+        "1947685",
+        "1947684",
+        "1947652",
+        "1947662"
+    ],
+    "required_filters": [],
+    "locked_filters": []
+}

@@ -23,3 +23,12 @@ yarn-debug.log*
 yarn-error.log*
 
 .idea
+
+# python (audio filtering pipeline in tools/)
+.venv
+__pycache__/
+*.pyc
+
+# generated filter artifacts
+testdata/*.edl
+testdata/*.report.json
