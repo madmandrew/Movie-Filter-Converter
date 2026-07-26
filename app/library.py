@@ -31,6 +31,91 @@ DEFAULT_ROOTS = {
 #: Filenames the app produces; never offer them as filter sources.
 _SKIP_MARKERS = (".FILTERED.", ".ORIGINAL.", "unfilteredArchive")
 
+#: Where originals go before filtering. `{root}` expands to the media root shared by the
+#: configured libraries, so the default keeps archives on the same volume as the source —
+#: which matters because a cross-volume archive is a full copy rather than a fast move.
+DEFAULT_ARCHIVE = {
+    "template": "{root}/toFilter/unfilteredArchive/{name}",
+    "keep_tree": False,
+}
+
+
+def archive_config() -> dict:
+    cfg = dict(DEFAULT_ARCHIVE)
+    cfg.update(get_setting("archive", {}) or {})
+    return cfg
+
+
+def media_root() -> str:
+    """Common parent of the configured library roots — the meaning of `{root}`.
+
+    With roots like /media/tv and /media/movies this yields /media, so the default
+    archive template keeps originals on the same volume as the source.
+
+    Roots can span volumes (a dev machine might mix C:\\ and Z:\\), and a naive
+    `commonpath` over those either raises or — worse — picks whichever volume happens to
+    win, silently sending archives to the wrong disk. So group roots by volume and use
+    the group holding the most libraries.
+    """
+    paths = [os.path.abspath(p) for p in roots().values() if p]
+    if not paths:
+        return ""
+    if len(paths) == 1:
+        return os.path.dirname(paths[0].rstrip("/\\")) or paths[0]
+
+    by_drive: dict[str, list[str]] = {}
+    for p in paths:
+        by_drive.setdefault(os.path.splitdrive(p)[0].lower(), []).append(p)
+    group = max(by_drive.values(), key=len)
+
+    if len(group) == 1:
+        return os.path.dirname(group[0].rstrip("/\\")) or group[0]
+    try:
+        return os.path.commonpath(group)
+    except ValueError:
+        return os.path.dirname(group[0].rstrip("/\\"))
+
+
+def archive_path_for(src: str, cfg: dict | None = None) -> str:
+    """Resolve the archive destination for one source file.
+
+    Pass `cfg` to evaluate a candidate template without saving it (used by the settings
+    preview), so previewing never mutates shared state.
+
+    Template placeholders:
+      {root}    the shared media root
+      {name}    filename with extension
+      {stem}    filename without extension
+      {ext}     extension including the dot
+      {library} which library the title belongs to
+      {reldir}  the source's directory relative to its library root (with keep_tree)
+    """
+    cfg = cfg or archive_config()
+    row = connect().execute(
+        "SELECT library FROM titles WHERE path=?", (src,)
+    ).fetchone()
+    library = row["library"] if row else ""
+
+    reldir = ""
+    if cfg.get("keep_tree"):
+        lib_root = roots().get(library)
+        if lib_root:
+            try:
+                reldir = os.path.relpath(os.path.dirname(src), lib_root)
+                if reldir == ".":
+                    reldir = ""
+            except ValueError:
+                reldir = ""
+
+    name = os.path.basename(src)
+    stem, ext = os.path.splitext(name)
+    out = cfg["template"].format(
+        root=media_root(), name=name, stem=stem, ext=ext,
+        library=library, reldir=reldir,
+    )
+    # Collapse the empty {reldir} case so the path has no doubled separators.
+    return os.path.normpath(out)
+
 
 def roots() -> dict[str, str]:
     """Library roots: DB setting wins, else the env seed, else the defaults.
@@ -54,6 +139,45 @@ def roots() -> dict[str, str]:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def within_roots(path: str) -> bool:
+    """Is `path` inside a configured library root?
+
+    Several endpoints take a filesystem path from the client (`/api/title`, `/api/clip`,
+    `/api/runs`). Without this check the app would happily probe, stream, or overwrite any
+    file the process can reach — which matters as soon as it is exposed beyond the LAN.
+    """
+    try:
+        target = os.path.abspath(path)
+        # realpath only resolves what exists; for a not-yet-created destination, resolve
+        # the nearest existing ancestor so symlink tricks are still caught while an
+        # archive directory that has not been made yet is not rejected.
+        probe = target
+        while probe and not os.path.exists(probe):
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                break
+            probe = parent
+        if probe and os.path.exists(probe):
+            target = os.path.join(os.path.realpath(probe),
+                                  os.path.relpath(target, probe))
+        target = os.path.normpath(target)
+    except (OSError, ValueError):
+        return False
+    for root in roots().values():
+        if not root:
+            continue
+        try:
+            base = os.path.realpath(os.path.abspath(root))
+        except OSError:
+            continue
+        try:
+            if os.path.commonpath([target, base]) == base:
+                return True
+        except ValueError:
+            continue        # different volumes have no common path
+    return False
 
 
 def is_candidate(path: str) -> bool:

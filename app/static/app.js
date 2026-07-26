@@ -33,6 +33,7 @@ $$('.tab').forEach((b) => b.addEventListener('click', () => {
   $(`#view-${b.dataset.view}`).classList.remove('hidden');
   if (b.dataset.view === 'runs') loadRuns();
   if (b.dataset.view === 'words') loadWords();
+  if (b.dataset.view === 'settings') loadSettings();
 }));
 
 /* ---------------------------------------------------------------- library */
@@ -96,8 +97,14 @@ $('#rescan').addEventListener('click', async (e) => {
 
 /* ------------------------------------------------------------ filter modal */
 const modal = $('#modal');
-$('#modalclose').addEventListener('click', () => modal.classList.add('hidden'));
-modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+const closeModal = () => modal.classList.add('hidden');
+$('#modalclose').addEventListener('click', closeModal);
+modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
+// Always leave a keyboard escape hatch — a modal that cannot be dismissed blocks the
+// whole page.
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal();
+});
 
 async function openFilter(path) {
   modal.classList.remove('hidden');
@@ -144,10 +151,85 @@ async function openFilter(path) {
         <span>Scan the whole track for word-list matches
           <code>— finds words VidAngel missed; hits await your review</code></span></label>
     </fieldset>
+    <fieldset><legend>Manual filters</legend>
+      <p class="muted">For titles VidAngel doesn't cover, or a single thing you want gone.
+        A word plus a rough time is located and verified precisely; a time range is
+        applied exactly as entered.</p>
+      <div class="toolbar">
+        <select id="mankind">
+          <option value="word">Mute a word near…</option>
+          <option value="range">Mute a time range</option>
+          <option value="cut">Cut video</option>
+        </select>
+        <input id="manword" placeholder="word" style="max-width:9rem">
+        <input id="manat" placeholder="mm:ss or seconds" style="max-width:11rem">
+        <input id="manend" placeholder="end (mm:ss)" style="max-width:11rem" class="hidden">
+        <label class="row hidden" id="mansnapwrap">
+          <input type="checkbox" id="mansnap" checked><span>snap to scene cuts</span></label>
+        <button id="manadd" class="secondary">Add</button>
+      </div>
+      <div id="manlist"></div>
+    </fieldset>
     <div class="toolbar">
       <button id="mgo">Queue filter run</button>
       <span id="mmsg" class="muted"></span>
     </div>`;
+
+  /* --- manual entry list ------------------------------------------------- */
+  const manual = [];
+  const parseTime = (v) => {
+    const s = String(v).trim();
+    if (!s) return null;
+    if (s.includes(':')) {
+      const parts = s.split(':').map(Number);
+      if (parts.some(Number.isNaN)) return null;
+      return parts.reduce((acc, p) => acc * 60 + p, 0);
+    }
+    const n = Number(s);
+    return Number.isNaN(n) ? null : n;
+  };
+
+  const renderManual = () => {
+    $('#manlist').innerHTML = manual.map((m, i) => {
+      let desc;
+      if (m.kind === 'word') desc = `mute “${m.word}” near ${tc(m.at)}`;
+      else if (m.kind === 'range') desc = `mute ${tc(m.start)}–${tc(m.end)}`;
+      else desc = `cut video ${tc(m.start)}–${tc(m.end)}${m.snap ? ' (snapped)' : ''}`;
+      return `<span class="chip">${esc(desc)}
+        <button data-i="${i}" title="Remove">&times;</button></span>`;
+    }).join(' ');
+    $$('#manlist button').forEach((b) => b.addEventListener('click', () => {
+      manual.splice(Number(b.dataset.i), 1);
+      renderManual();
+    }));
+  };
+
+  const syncManualFields = () => {
+    const k = $('#mankind').value;
+    $('#manword').classList.toggle('hidden', k !== 'word');
+    $('#manend').classList.toggle('hidden', k === 'word');
+    $('#mansnapwrap').classList.toggle('hidden', k !== 'cut');
+    $('#manat').placeholder = k === 'word' ? 'approx time (mm:ss)' : 'start (mm:ss)';
+  };
+  $('#mankind').addEventListener('change', syncManualFields);
+  syncManualFields();
+
+  $('#manadd').addEventListener('click', () => {
+    const kind = $('#mankind').value;
+    const at = parseTime($('#manat').value);
+    if (at == null) { alert('Enter a time as mm:ss or seconds.'); return; }
+    if (kind === 'word') {
+      const w = $('#manword').value.trim();
+      if (!w) { alert('Enter the word to mute.'); return; }
+      manual.push({ kind, word: w, at });
+    } else {
+      const end = parseTime($('#manend').value);
+      if (end == null || end <= at) { alert('End must be after start.'); return; }
+      manual.push({ kind, start: at, end, snap: $('#mansnap').checked });
+    }
+    $('#manword').value = ''; $('#manat').value = ''; $('#manend').value = '';
+    renderManual();
+  });
 
   $('#mts').addEventListener('change', async (e) => {
     const id = e.target.value;
@@ -181,6 +263,12 @@ async function openFilter(path) {
         video_categories: videoCats,
         quality: $('input[name=q]:checked').value,
         do_scan: $('#mscan').checked,
+        manual_mutes: manual.filter((m) => m.kind !== 'cut').map((m) =>
+          m.kind === 'word'
+            ? { word: m.word, at: m.at }
+            : { start: m.start, end: m.end }),
+        manual_cuts: manual.filter((m) => m.kind === 'cut').map((m) =>
+          ({ start: m.start, end: m.end, snap: m.snap })),
       });
       $('#mmsg').textContent = `queued as run #${r.run_id}`;
       setTimeout(() => { modal.classList.add('hidden'); $$('.tab')[1].click(); }, 700);
@@ -301,6 +389,102 @@ $('#savetagset').addEventListener('click', async () => {
     $('#payload').value = '';
   } catch (e) {
     $('#tagsetmsg').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+  }
+});
+
+/* --------------------------------------------------------------- settings */
+let sampleTitle = null;
+
+async function loadSettings() {
+  const s = await api('/api/settings');
+  $('#archtpl').value = s.archive.template;
+  $('#archtree').checked = !!s.archive.keep_tree;
+  $('#archph').innerHTML =
+    `Placeholders: ${s.archive_placeholders.map((p) => `<code>${esc(p)}</code>`).join(' ')}
+     &nbsp;·&nbsp; <code>{root}</code> resolves to <code>${esc(s.media_root || '—')}</code>`;
+
+  $('#roots').innerHTML = Object.entries(s.library_roots).map(([k, v]) => `
+    <div class="toolbar">
+      <input class="rootname" value="${esc(k)}" style="max-width:12rem">
+      <input class="rootpath" value="${esc(v)}" style="flex:1 1 20rem">
+      <button class="secondary rootdel" title="Remove">&times;</button>
+    </div>`).join('');
+  $$('.rootdel').forEach((b) => b.addEventListener('click', () => {
+    b.closest('.toolbar').remove();
+  }));
+
+  // Preview against a real title so the template's effect is concrete.
+  if (!sampleTitle) {
+    const lib = await api('/api/library?limit=1');
+    sampleTitle = lib.items[0]?.path || null;
+  }
+  previewArchive();
+}
+
+let prevTimer;
+async function previewArchive() {
+  if (!sampleTitle) { $('#archprev').textContent = ''; return; }
+  const qs = new URLSearchParams({
+    path: sampleTitle,
+    template: $('#archtpl').value,
+    keep_tree: $('#archtree').checked ? 'true' : 'false',
+  });
+  try {
+    const r = await api(`/api/settings/archive-preview?${qs}`);
+    $('#archprev').innerHTML =
+      `<div style="margin-top:.4rem">Example — <code>${esc(sampleTitle.split(/[\\/]/).pop())}</code>
+       would archive to:<br><code>${esc(r.archive_path)}</code></div>`;
+  } catch (e) {
+    $('#archprev').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+  }
+}
+$('#archtpl').addEventListener('input', () => {
+  clearTimeout(prevTimer);
+  prevTimer = setTimeout(previewArchive, 300);
+});
+$('#archtree').addEventListener('change', previewArchive);
+
+$('#archsave').addEventListener('click', async () => {
+  try {
+    await postJSON('/api/settings', {
+      archive: { template: $('#archtpl').value, keep_tree: $('#archtree').checked },
+    });
+    $('#archmsg').innerHTML = '<span class="pill ok">saved</span>';
+  } catch (e) {
+    $('#archmsg').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+  }
+});
+
+$('#addroot').addEventListener('click', () => {
+  const name = $('#newrootname').value.trim();
+  const p = $('#newrootpath').value.trim();
+  if (!name || !p) return;
+  $('#roots').insertAdjacentHTML('beforeend', `
+    <div class="toolbar">
+      <input class="rootname" value="${esc(name)}" style="max-width:12rem">
+      <input class="rootpath" value="${esc(p)}" style="flex:1 1 20rem">
+      <button class="secondary rootdel" title="Remove">&times;</button>
+    </div>`);
+  $('#newrootname').value = ''; $('#newrootpath').value = '';
+  $$('.rootdel').forEach((b) => b.addEventListener('click', () => {
+    b.closest('.toolbar').remove();
+  }));
+});
+
+$('#rootsave').addEventListener('click', async () => {
+  const roots = {};
+  $$('#roots .toolbar').forEach((row) => {
+    const k = $('.rootname', row).value.trim();
+    const v = $('.rootpath', row).value.trim();
+    if (k && v) roots[k] = v;
+  });
+  try {
+    await postJSON('/api/settings', { library_roots: roots });
+    $('#rootmsg').innerHTML =
+      '<span class="pill ok">saved — rescan the library to pick up changes</span>';
+    await loadSettings();
+  } catch (e) {
+    $('#rootmsg').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
   }
 });
 

@@ -37,13 +37,68 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="Movie Filter", lifespan=lifespan)
 
 
+#: Optional HTTP basic auth, enabled by setting FILTER_PASSWORD.
+#:
+#: Off by default: on a LAN behind Unraid this app is already only as reachable as the
+#: server. But it can read arbitrary paths, queue jobs that rewrite media files, and
+#: delete nothing yet still overwrite plenty — so any time it is exposed beyond the LAN
+#: (a tunnel, a reverse proxy, a port forward) a password is mandatory, not optional.
+_AUTH_USER = os.environ.get("FILTER_USER", "admin")
+_AUTH_PASS = os.environ.get("FILTER_PASSWORD")
+
+
+@app.middleware("http")
+async def _basic_auth(request: Request, call_next):
+    if not _AUTH_PASS:
+        return await call_next(request)
+
+    import base64
+    import secrets
+
+    header = request.headers.get("authorization", "")
+    ok = False
+    if header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(header[6:]).decode("utf-8")
+            user, _, pw = decoded.partition(":")
+            # compare_digest on both fields to avoid leaking length via timing
+            ok = (secrets.compare_digest(user, _AUTH_USER)
+                  and secrets.compare_digest(pw, _AUTH_PASS))
+        except (ValueError, UnicodeDecodeError):
+            ok = False
+
+    if not ok:
+        return JSONResponse(
+            {"detail": "authentication required"}, status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Movie Filter"'},
+        )
+    return await call_next(request)
+
+
 app.mount("/static", StaticFiles(directory=os.path.join(_HERE, "static")), name="static")
 
 
 @app.get("/", response_class=HTMLResponse)
-def index() -> str:
-    with open(os.path.join(_HERE, "templates", "index.html"), encoding="utf-8") as fh:
-        return fh.read()
+def index() -> HTMLResponse:
+    """Serve the page with cache-busted asset URLs.
+
+    Browsers hold on to `app.css` / `app.js` hard enough that a fixed stylesheet can keep
+    rendering the old layout after a deploy. Appending each file's mtime makes the URL
+    change whenever the file does, so a stale asset is impossible without asking anyone to
+    clear their cache. The page itself is sent no-store for the same reason.
+    """
+    tpl = os.path.join(_HERE, "templates", "index.html")
+    with open(tpl, encoding="utf-8") as fh:
+        html = fh.read()
+
+    for asset in ("app.css", "app.js"):
+        try:
+            stamp = int(os.path.getmtime(os.path.join(_HERE, "static", asset)))
+        except OSError:
+            continue
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={stamp}")
+
+    return HTMLResponse(html, headers={"Cache-Control": "no-store, must-revalidate"})
 
 
 # --------------------------------------------------------------------- library
@@ -65,6 +120,8 @@ def api_scan():
 
 @app.get("/api/title")
 def api_title(path: str):
+    if not library.within_roots(path):
+        raise HTTPException(403, "path is outside the configured library roots")
     try:
         info = library.ensure_probed(path)
     except KeyError:
@@ -205,12 +262,36 @@ def api_del_word(word: str):
 
 # ----------------------------------------------------------------------- runs
 
+class ManualMute(BaseModel):
+    """One hand-specified audio mute.
+
+    Either `word` + `at` (a rough timestamp; the word is then located and verified
+    precisely) or an explicit `start`/`end` range applied as given.
+    """
+    word: str | None = None
+    at: float | None = None
+    search_pad: float = 5.0
+    start: float | None = None
+    end: float | None = None
+    label: str | None = None
+
+
+class ManualCut(BaseModel):
+    """One hand-specified video cut. `snap` aligns edges to detected shot boundaries."""
+    start: float
+    end: float
+    snap: bool = True
+    pad: float = 0.0
+
+
 class RunIn(BaseModel):
     path: str
     tag_set_id: int | None = None
     categories: list[str] = []
     video_categories: list[str] = []
     words: list[str] | None = None
+    manual_mutes: list[ManualMute] = []
+    manual_cuts: list[ManualCut] = []
     quality: str = "splice"
     model: str = "small.en"
     do_scan: bool = True
@@ -221,12 +302,36 @@ class RunIn(BaseModel):
 
 @app.post("/api/runs")
 def api_run(body: RunIn):
+    if not library.within_roots(body.path):
+        raise HTTPException(403, "path is outside the configured library roots")
     if not os.path.exists(body.path):
         raise HTTPException(404, "file not found")
+    # A run writes both of these, so neither may escape the library either.
+    for label, p in (("output_path", body.output_path),
+                     ("archive_path", body.archive_path)):
+        if p and not library.within_roots(p):
+            raise HTTPException(403, f"{label} is outside the configured library roots")
+
+    for m in body.manual_mutes:
+        has_word = bool(m.word) and m.at is not None
+        has_range = m.start is not None and m.end is not None
+        if not (has_word or has_range):
+            raise HTTPException(
+                400, "each manual mute needs either word+at or start+end")
+        if has_range and m.end <= m.start:
+            raise HTTPException(400, f"mute end must be after start ({m.start}-{m.end})")
+    for cvt in body.manual_cuts:
+        if cvt.end <= cvt.start:
+            raise HTTPException(400, f"cut end must be after start ({cvt.start}-{cvt.end})")
 
     opts = body.model_dump()
     if opts["words"] is None:
         opts["words"] = db.enabled_words()
+
+    if not (opts["categories"] or opts["video_categories"] or opts["manual_mutes"]
+            or opts["manual_cuts"] or (opts["do_scan"] and opts["words"])):
+        raise HTTPException(400, "nothing to filter: pick categories, add a manual "
+                                 "mute/cut, or enable the word-list scan")
 
     # Default output/archive paths: filtered file replaces the library copy, original
     # goes to unfilteredArchive next to the configured toFilter root.
@@ -234,9 +339,7 @@ def api_run(body: RunIn):
         stem, ext = os.path.splitext(body.path)
         opts["output_path"] = f"{stem}.FILTERED{ext}"
     if not opts["archive_path"]:
-        base = os.path.basename(body.path)
-        root = library.roots().get("toFilter", os.path.dirname(body.path))
-        opts["archive_path"] = os.path.join(root, "unfilteredArchive", base)
+        opts["archive_path"] = library.archive_path_for(body.path)
 
     run_id = jobs.enqueue(body.path, opts)
     return {"run_id": run_id}
@@ -324,6 +427,8 @@ def api_clip(path: str, start: float, end: float):
 
     Clamped to a few seconds — this is a review aid, not a media server.
     """
+    if not library.within_roots(path):
+        raise HTTPException(403, "path is outside the configured library roots")
     if not os.path.exists(path):
         raise HTTPException(404, "file not found")
     start = max(0.0, start - 2.0)
@@ -348,17 +453,47 @@ def api_clip(path: str, start: float, end: float):
 
 @app.get("/api/settings")
 def api_settings():
-    return {"library_roots": library.roots()}
+    return {
+        "library_roots": library.roots(),
+        "archive": library.archive_config(),
+        "media_root": library.media_root(),
+        "archive_placeholders": ["{root}", "{name}", "{stem}", "{ext}",
+                                 "{library}", "{reldir}"],
+    }
 
 
 class SettingsIn(BaseModel):
-    library_roots: dict[str, str]
+    library_roots: dict[str, str] | None = None
+    archive: dict | None = None
 
 
 @app.post("/api/settings")
 def api_set_settings(body: SettingsIn):
-    db.set_setting("library_roots", body.library_roots)
+    if body.library_roots is not None:
+        db.set_setting("library_roots", body.library_roots)
+    if body.archive is not None:
+        tmpl = str(body.archive.get("template", "")).strip()
+        if not tmpl:
+            raise HTTPException(400, "archive template cannot be empty")
+        # Reject a template that would overwrite the source it is meant to protect.
+        if "{name}" not in tmpl and "{stem}" not in tmpl:
+            raise HTTPException(
+                400, "archive template must include {name} or {stem}, otherwise every "
+                     "title would archive to the same path and overwrite the previous one")
+        db.set_setting("archive", {"template": tmpl,
+                                   "keep_tree": bool(body.archive.get("keep_tree"))})
     return {"ok": True}
+
+
+@app.get("/api/settings/archive-preview")
+def api_archive_preview(path: str, template: str | None = None,
+                        keep_tree: bool = False):
+    """Show where a given title would be archived, before saving the setting."""
+    cfg = ({"template": template, "keep_tree": keep_tree} if template else None)
+    try:
+        return {"archive_path": library.archive_path_for(path, cfg)}
+    except (KeyError, IndexError, ValueError) as exc:
+        raise HTTPException(400, f"invalid template: {exc}")
 
 
 @app.get("/api/health")

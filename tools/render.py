@@ -28,28 +28,38 @@ def _run(args: list[str]) -> None:
 
 
 #: Hardware encoder candidates, tried in order and **verified by actually encoding**.
-#: Listing an encoder in `ffmpeg -encoders` does NOT mean it works: on this machine
-#: `h264_nvenc` is listed but fails at runtime because the NVIDIA driver exposes nvenc
-#: API 13.0 while the ffmpeg build requires 13.1. Only a real encode proves it.
 #:
-#: Measured on 60 s of 1080p (Community S01E02):
-#:   h264_qsv (Intel Iris Xe)  9.1 s  = 6.62x realtime, 39.2 MB   <- best
+#: Listing an encoder in `ffmpeg -encoders` does NOT mean it works. On the development
+#: laptop `h264_nvenc` is listed but fails at runtime (the NVIDIA driver exposes nvenc
+#: API 13.0 while the ffmpeg build wants 13.1), while on the Unraid deployment target — a
+#: GTX 1070/1080 with current drivers — NVENC is the *best* option and QSV is absent
+#: entirely. So the order below is a preference, not a ranking of one machine's hardware,
+#: and `_encoder_works()` decides what is actually usable on the host.
+#:
+#: NVENC is listed first because a discrete NVIDIA card is the expected server
+#: configuration; QSV second because it is what this laptop has; AMF for completeness.
+#:
+#: Speeds measured on 60 s of 1080p on the laptop (Intel Iris Xe / no working NVENC):
+#:   h264_qsv                  9.1 s  = 6.62x realtime, 39.2 MB
 #:   libx264 veryfast         25.6 s  = 2.35x realtime, 53.5 MB
-#:   libx264 faster           43.2 s  = 1.39x realtime, 58.9 MB
 #:   libx264 medium           77.5 s  = 0.77x realtime, 60.0 MB
 #:   libx264 slow            127.3 s  = 0.47x realtime, 70.4 MB   <- unusable
+#: Pascal-generation NVENC should land in the same order of magnitude as QSV.
+#:
+#: Note: Pascal (10-series) NVENC does **not** support HEVC 10-bit B-frames and has no
+#: AV1 encoder, but for 8-bit H.264/HEVC re-encodes it is fine.
 _HW_CANDIDATES = {
     "h264": [
-        (["-c:v", "h264_qsv", "-global_quality", "20"], "h264_qsv"),
         (["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "20",
           "-b:v", "0"], "h264_nvenc"),
+        (["-c:v", "h264_qsv", "-global_quality", "20"], "h264_qsv"),
         (["-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "20",
           "-qp_p", "20"], "h264_amf"),
     ],
     "hevc": [
-        (["-c:v", "hevc_qsv", "-global_quality", "22"], "hevc_qsv"),
         (["-c:v", "hevc_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "22",
           "-b:v", "0"], "hevc_nvenc"),
+        (["-c:v", "hevc_qsv", "-global_quality", "22"], "hevc_qsv"),
     ],
 }
 

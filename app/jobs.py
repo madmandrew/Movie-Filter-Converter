@@ -130,7 +130,7 @@ def _execute(run_id: int) -> None:
             if warn:
                 _log(run_id, f"WARNING {warn}")
 
-    categories = tuple(opts.get("categories") or vidangel.DEFAULT_CATEGORIES)
+    categories = tuple(opts.get("categories") or ())
     words = opts.get("words") or []
 
     # ---- archive ----------------------------------------------------------------
@@ -255,26 +255,96 @@ def _execute(run_id: int) -> None:
         _log(run_id, f"scan: {len(hits)} hits, {len(covered)} covered, "
                      f"{len(auto)} auto-muted, {len(pending)} awaiting review")
 
+    # ---- manual entries ---------------------------------------------------------
+    # Hand-specified mutes and cuts, for the cases where VidAngel has nothing and the
+    # user knows exactly what they want gone.
+    #
+    # Two flavours of manual audio mute:
+    #   * a word at an approximate time  -> located and verified like a tagged incident,
+    #     so the user supplies a rough timestamp rather than frame-accurate boundaries
+    #   * an explicit start/end range    -> muted exactly as given, no word-finding
+    manual_mutes = opts.get("manual_mutes") or []
+    for n, m in enumerate(manual_mutes):
+        _stage(run_id, f"manual mute {n + 1}/{len(manual_mutes)}",
+               60 + 5 * n / max(1, len(manual_mutes)))
+        word = (m.get("word") or "").strip()
+        ref = f"manual{n}"
+
+        if word and m.get("at") is not None:
+            at = float(m["at"])
+            pad = float(m.get("search_pad", 5.0))
+            mt = locate(path, word, at, at, fps, model=model, search_pad=pad)
+            if mt is None:
+                results.append({"ref_id": ref, "word": word, "bucket": at,
+                                "status": "NOT_FOUND",
+                                "note": f"no '{word}' within +/-{pad:.0f}s of {at:.1f}s"})
+                _log(run_id, f"manual: '{word}' not found near {at:.1f}s")
+                continue
+            s, e, v, rounds = tighten(path, word, mt.start, mt.end, fps, model=model)
+            mutes.append((ref, s, e))
+            results.append({"ref_id": ref, "word": word, "bucket": at,
+                            "start": round(s, 3), "end": round(e, 3),
+                            "drift": round(s - at, 3),
+                            "confidence": round(mt.confidence, 3), "rounds": rounds,
+                            "status": "OK_MANUAL" if v.ok else "REVIEW",
+                            "note": v.note})
+            _log(run_id, f"manual: '{word}' -> {s:.3f}-{e:.3f}")
+        else:
+            # Explicit range: trust the user, but still snap to frame boundaries so the
+            # mute cannot land mid-frame.
+            s = float(m["start"])
+            e = float(m["end"])
+            s, e = snap_to_frames(max(0.0, s), e, fps)
+            mutes.append((ref, s, e))
+            results.append({"ref_id": ref, "word": m.get("label") or "(manual range)",
+                            "bucket": None, "start": round(s, 3), "end": round(e, 3),
+                            "status": "OK_MANUAL", "note": "explicit range, not verified"})
+            _log(run_id, f"manual range mute {s:.3f}-{e:.3f}")
+
     # ---- video ranges -----------------------------------------------------------
     video_ranges: list[dict] = []
-    if ts and opts.get("video_categories"):
-        _stage(run_id, "detecting scene cuts", 70)
+    manual_cuts = opts.get("manual_cuts") or []
+    want_tagged_video = bool(ts and opts.get("video_categories"))
+
+    if want_tagged_video or manual_cuts:
         from scenes import detect_cuts, merge_ranges, snap_range
 
-        cuts = detect_cuts(path)
-        _log(run_id, f"{len(cuts)} scene cuts detected")
-        wanted = set(opts["video_categories"])
+        # Scene detection is one full pass over the video, so only run it if something
+        # will actually use it: tagged ranges always snap, manual ranges only on request.
+        need_cuts = want_tagged_video or any(m.get("snap") for m in manual_cuts)
+        cuts: list[float] = []
+        if need_cuts:
+            _stage(run_id, "detecting scene cuts", 70)
+            cuts = detect_cuts(path)
+            _log(run_id, f"{len(cuts)} scene cuts detected")
+
         vr = []
-        for inc in ts.incidents:
-            if inc.kind != "audiovisual" or inc.is_structural:
-                continue
-            if inc.category_key not in wanted and inc.category_title not in wanted:
-                continue
-            vr.append(snap_range(
-                inc.start_approx,
-                max(inc.end_approx, inc.start_approx + vidangel.BUCKET_SECONDS),
-                cuts, duration=duration,
-            ))
+        if want_tagged_video:
+            wanted = set(opts["video_categories"])
+            for inc in ts.incidents:
+                if inc.kind != "audiovisual" or inc.is_structural:
+                    continue
+                if inc.category_key not in wanted and inc.category_title not in wanted:
+                    continue
+                vr.append(snap_range(
+                    inc.start_approx,
+                    max(inc.end_approx, inc.start_approx + vidangel.BUCKET_SECONDS),
+                    cuts, duration=duration,
+                ))
+
+        for m in manual_cuts:
+            s, e = float(m["start"]), float(m["end"])
+            if m.get("snap"):
+                vr.append(snap_range(s, e, cuts, duration=duration,
+                                     pad=float(m.get("pad", 0.0))))
+            else:
+                from scenes import VideoRange
+
+                vr.append(VideoRange(start=max(0.0, s), end=min(duration, e),
+                                     method="manual", approx_start=s, approx_end=e))
+            _log(run_id, f"manual cut {s:.1f}-{e:.1f}"
+                         f"{' (snapped)' if m.get('snap') else ''}")
+
         for r in merge_ranges(vr):
             video_ranges.append({"start": round(r.start, 3), "end": round(r.end, 3),
                                  "method": r.method})

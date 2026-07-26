@@ -66,7 +66,10 @@ textarea { width: 100%; font-family: ui-monospace, Consolas, monospace; font-siz
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 main { padding: 1.25rem; max-width: 1400px; margin: 0 auto; }
-.view.hidden, .hidden { display: none; }
+/* `!important` because .modal (and other component rules) set `display` later in this
+   file at equal specificity, which would otherwise win and leave a hidden element
+   permanently visible. */
+.hidden { display: none !important; }
 .muted { color: var(--muted); font-size: .9em; }
 
 .toolbar {

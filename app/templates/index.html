@@ -14,6 +14,7 @@
     <button class="tab" data-view="runs">Runs</button>
     <button class="tab" data-view="words">Word list</button>
     <button class="tab" data-view="tagsets">Tag-sets</button>
+    <button class="tab" data-view="settings">Settings</button>
   </nav>
   <span id="health" class="pill"></span>
 </header>
@@ -87,6 +88,41 @@
     <textarea id="payload" rows="10" placeholder="paste tag-set JSON…"></textarea>
     <button id="savetagset">Save tag-set</button>
     <div id="tagsetmsg"></div>
+  </section>
+
+  <!-- ----------------------------------------------------------- settings -->
+  <section id="view-settings" class="view hidden">
+    <fieldset><legend>Unfiltered archive</legend>
+      <p class="muted">
+        Where the original is copied before filtering. This copy is the only way back to
+        the raw cut, since video cuts remove frames permanently.
+        Keep it on the same volume as your media — a cross-volume archive is a full copy.
+      </p>
+      <div class="toolbar">
+        <input id="archtpl" style="flex:1 1 30rem" spellcheck="false">
+        <label class="row"><input type="checkbox" id="archtree">
+          <span>Mirror folder structure</span></label>
+      </div>
+      <div class="muted" id="archph"></div>
+      <div class="toolbar">
+        <button id="archsave">Save</button>
+        <span id="archmsg" class="muted"></span>
+      </div>
+      <div id="archprev" class="muted"></div>
+    </fieldset>
+
+    <fieldset><legend>Library roots</legend>
+      <p class="muted">Paths the library scanner walks. Inside Docker these are the
+        container's mount points, e.g. <code>/media/movies</code>.</p>
+      <div id="roots"></div>
+      <div class="toolbar">
+        <input id="newrootname" placeholder="name, e.g. anime" style="max-width:12rem">
+        <input id="newrootpath" placeholder="/media/anime" style="flex:1 1 20rem">
+        <button id="addroot" class="secondary">Add root</button>
+        <button id="rootsave">Save roots</button>
+        <span id="rootmsg" class="muted"></span>
+      </div>
+    </fieldset>
   </section>
 </main>
 
