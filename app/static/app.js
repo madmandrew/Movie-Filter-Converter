@@ -151,6 +151,17 @@ async function openFilter(path) {
       <label class="row"><input type="checkbox" id="mscan" checked>
         <span>Scan the whole track for word-list matches
           <code>— finds words VidAngel missed; hits await your review</code></span></label>
+      <label class="row"><input type="checkbox" id="monlyen">
+        <span>Only tags already enabled in VidAngel
+          <code>— use your existing selections instead of whole categories</code></span></label>
+      <label class="row">
+        <span>Whisper model</span>
+        <select id="mmodel">
+          <option value="small.en">small.en — fast, verified</option>
+          <option value="medium.en">medium.en — slower, may catch more</option>
+          <option value="base.en">base.en — fastest, least accurate</option>
+        </select>
+      </label>
     </fieldset>
     <fieldset><legend>Manual filters</legend>
       <p class="muted">For titles VidAngel doesn't cover, or a single thing you want gone.
@@ -264,6 +275,8 @@ async function openFilter(path) {
         video_categories: videoCats,
         quality: $('input[name=q]:checked').value,
         do_scan: $('#mscan').checked,
+        only_enabled: $('#monlyen').checked,
+        model: $('#mmodel').value,
         manual_mutes: manual.filter((m) => m.kind !== 'cut').map((m) =>
           m.kind === 'word'
             ? { word: m.word, at: m.at }
@@ -292,11 +305,21 @@ async function loadRuns() {
       <td><span class="pill ${cls}">${esc(r.status)}</span></td>
       <td class="muted">${esc(r.stage || '')}</td>
       <td><div class="bar"><i style="width:${pct}%"></i></div></td>
-      <td><button class="secondary rundet" data-id="${r.id}">Details</button></td>
+      <td><button class="secondary rundet" data-id="${r.id}">Details</button>
+        ${r.status === 'queued'
+          ? `<button class="secondary runcancel" data-id="${r.id}">Cancel</button>` : ''}
+      </td>
     </tr>`;
   }).join('') || '<tr><td colspan="6" class="muted">No runs yet.</td></tr>';
 
   $$('.rundet').forEach((b) => b.addEventListener('click', () => showRun(b.dataset.id)));
+  // Only queued runs can be cancelled — a running job is mid-write in ffmpeg/Whisper.
+  $$('.runcancel').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      await postJSON(`/api/runs/${b.dataset.id}/cancel`, {});
+      loadRuns();
+    } catch (e) { alert(e.message); }
+  }));
 }
 
 async function showRun(id) {
@@ -338,7 +361,11 @@ async function showRun(id) {
             <span class="muted">p=${h.confidence}</span>
           </div>
         </div>`).join('')}</div>
-      <p class="muted">Decisions are remembered; re-run the filter to apply them.</p>
+      <div class="toolbar" style="margin-top:.6rem">
+        <button id="rerun">Re-run to apply decisions</button>
+        <span class="muted">A mute has to be located and rendered, so applying
+          decisions needs another pass.</span>
+      </div>
       </fieldset>` : ''}
     ${rep.render ? `<fieldset><legend>Render</legend>
       <div>${esc(rep.render.summary || '')}</div></fieldset>` : ''}
@@ -353,6 +380,22 @@ async function showRun(id) {
     $$('button', hit).forEach((x) => { x.disabled = true; });
     b.textContent = b.dataset.a === 'mute' ? 'will mute' : 'skipped';
   }));
+
+  const rerunBtn = $('#rerun');
+  if (rerunBtn) {
+    rerunBtn.addEventListener('click', async (e) => {
+      e.target.disabled = true;
+      try {
+        const nr = await postJSON(`/api/runs/${r.id}/rerun`, {});
+        closeModal();
+        $$('.tab')[1].click();
+        setTimeout(() => showRun(nr.run_id), 400);
+      } catch (err) {
+        alert(`Could not re-run: ${err.message}`);
+        e.target.disabled = false;
+      }
+    });
+  }
 }
 
 /* -------------------------------------------------------------- word list */

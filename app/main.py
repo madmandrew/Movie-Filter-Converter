@@ -473,6 +473,33 @@ def api_run_detail(run_id: int):
     return d
 
 
+@app.post("/api/runs/{run_id}/rerun")
+def api_rerun(run_id: int):
+    """Queue the same run again, reusing its options.
+
+    The interactive review stores decisions but does not retro-apply them: a mute has to
+    be located and rendered, which means another pass. This makes that one click instead
+    of rebuilding the run by hand.
+
+    The archive is skipped if one already exists — `render()` refuses to overwrite an
+    archive, and the first run's copy is still the untouched original.
+    """
+    row = db.connect().execute(
+        "SELECT path, options_json FROM runs WHERE id=?", (run_id,)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown run")
+
+    opts = json.loads(row["options_json"] or "{}")
+    if not os.path.exists(row["path"]):
+        raise HTTPException(
+            404, "source file is gone — if it was replaced by the filtered version, "
+                 "restore from the archive before re-running")
+
+    new_id = jobs.enqueue(row["path"], opts)
+    return {"run_id": new_id, "reused_from": run_id}
+
+
 @app.post("/api/runs/{run_id}/cancel")
 def api_cancel(run_id: int):
     """Cancel a run that has not started yet.
