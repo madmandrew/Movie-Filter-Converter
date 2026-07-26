@@ -224,16 +224,65 @@ over SMB** — it isn't in Samba's password DB. Use a non-root user.
 - **`runtime_unaltered` vs. ffprobe duration** is a free pre-flight wrong-cut check
   (46025: 1282 vs 1278.45 = same cut).
 
+## Web app
+
+`app/` is a FastAPI service (see `README.md` to run it). Verified against the real library:
+**2,253 titles scanned in 37 s over SMB** (1,883 TV, 333 movies, 34 toFilter), and a full
+filter run — 5 audio incidents, 3 video cuts, archive, render — in **4m42s**.
+
+- `app/db.py` — SQLite: titles, runs, wordlist, review decisions, cached tag-sets
+- `app/library.py` — library scan (lazy ffprobe), search, archive-path templating,
+  `within_roots()` path guard
+- `app/jobs.py` — single-threaded job queue; one GPU job at a time
+- `app/main.py` — API + basic auth middleware
+- `app/static/`, `app/templates/` — the UI
+
+**Auth**: off unless `FILTER_PASSWORD` is set. **Set it whenever the app is reachable
+beyond the LAN** — it can read arbitrary paths and overwrite media. `FILTER_USER` defaults
+to `admin`.
+
+**Archive destination** is a template (Settings tab), default
+`{root}/toFilter/unfilteredArchive/{name}`. `{root}` resolves to the volume holding the
+most library roots — a plain `commonpath` over roots on two drives picked the wrong volume
+and would have archived to the system disk.
+
+**Manual filtering** needs no tag-set: a word + rough time (located and verified
+precisely), an explicit mute range, or a video cut with optional scene snapping.
+
+## Deployment notes
+
+- **Hardware video encoders are probed by running a real encode.** Being listed in
+  `ffmpeg -encoders` means nothing: on the dev laptop `h264_nvenc` is listed but fails
+  (driver nvenc API 13.0 vs. required 13.1), while `h264_qsv` works at **6.62x realtime**.
+  The deployment target is Unraid with a **GTX 1070/1080** — NVENC is tried first there and
+  QSV is absent. Do not re-tune this order for whichever machine is in front of you.
+- Software fallback is `libx264 -preset veryfast -crf 18` (2.35x realtime). Anything
+  slower than `medium` is unusable: `slow` measured **0.47x realtime**, ~45 min/episode.
+- **Every audio track is filtered.** Real files have many: Joker 7, Lord of War 4,
+  Apocalypse Now 2. Mapping only `a:0` would leave a selectable *unfiltered* track. Codec
+  options are per-stream, or a single `-c:a` converts an AC3 commentary track to DTS.
+- Browsers cache `app.css`/`app.js` hard; asset URLs carry an mtime query string. A CSS
+  `display` rule at equal specificity *after* `.hidden` will win — `.hidden` is
+  `!important` for exactly that reason.
+
 ## Not done / next up
 
-- **Nothing is committed.** Consider a branch + commit before the next round of work.
-- **Video cuts are not implemented at all** — only audio muting. Scene-snapping is
-  researched (see `DESIGN.md`) but unwritten.
-- **No automated tests.** The old `src/App.test.tsx` is the stock CRA test and fails.
-  The `tools/` code has none; all validation so far has been manual scripts.
-- **Only ever run on one episode.** The +2.5s drift pattern may not hold across titles,
-  and the wrong-master cases from `offsets.txt` (godfather +12s, 8 mile +11s) have not
-  been tested against this pipeline at all.
+- **The Docker image has never been built or run.** GPU passthrough on Unraid is
+  unverified; `/api/health` reports which device Whisper actually got.
+- **Only ever run on one episode.** The +2.5 s drift pattern may not hold across titles,
+  and the wrong-master cases from `offsets.txt` (godfather +12 s, 8 Mile +11 s) have not
+  been tested against this pipeline at all — a 12 s offset exceeds the ±7 s search window,
+  so the `runtime_unaltered` pre-flight would flag it but nothing corrects for it yet.
 - **`model="small.en"` is unvalidated as a choice** — `medium.en` may improve recall on
   the harder cases and fits in 4 GB VRAM. Untested.
-- **The web UI in `DESIGN.md` is not started**, by explicit instruction.
+- **Test coverage is one file** (`tests/test_matcher.py`, 62 cases). The pipeline,
+  splice, and API have no automated tests; validation has been manual scripts.
+- **The default word list is broad** (19 words incl. `god`, `douche`), so scans surface
+  more for review than the damn/hell/ass test scope did. Prune in the Word list tab.
+- **Interactive review applies on the *next* run.** Decisions are stored, not applied
+  retroactively — a re-run is needed to act on them.
+- **Duplicate titles are not detected.** The Godfather appears twice in the library
+  (24.92 GB and 87.46 GB, presumably one already filtered by hand) and the UI cannot tell
+  them apart.
+- **A running job cannot be cancelled**, only a queued one — ffmpeg/Whisper are mid-write
+  and killing them risks a partial file beside a real library file.
