@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Movie Filter</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header>
+  <h1>Movie Filter</h1>
+  <nav>
+    <button class="tab active" data-view="library">Library</button>
+    <button class="tab" data-view="runs">Runs</button>
+    <button class="tab" data-view="words">Word list</button>
+    <button class="tab" data-view="tagsets">Tag-sets</button>
+  </nav>
+  <span id="health" class="pill"></span>
+</header>
+
+<main>
+  <!-- ------------------------------------------------------------ library -->
+  <section id="view-library" class="view">
+    <div class="toolbar">
+      <input id="q" type="search" placeholder="Search titles…" autocomplete="off">
+      <select id="lib"><option value="">All libraries</option></select>
+      <select id="status">
+        <option value="">Any status</option>
+        <option value="unfiltered">Unfiltered</option>
+        <option value="filtered">Filtered</option>
+        <option value="failed">Failed</option>
+      </select>
+      <button id="rescan" class="secondary">Rescan library</button>
+      <span id="libstats" class="muted"></span>
+    </div>
+    <table id="titles">
+      <thead><tr>
+        <th>Title</th><th>Library</th><th>Size</th><th>Audio</th>
+        <th>Filter</th><th>VidAngel</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- --------------------------------------------------------------- runs -->
+  <section id="view-runs" class="view hidden">
+    <table id="runs">
+      <thead><tr>
+        <th>#</th><th>Title</th><th>Status</th><th>Stage</th>
+        <th>Progress</th><th></th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="rundetail"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------- word list -->
+  <section id="view-words" class="view hidden">
+    <p class="muted">
+      These words are searched across the whole audio track on every run, independent of
+      VidAngel. Hits that no tag covers are held for your review rather than muted
+      automatically.
+    </p>
+    <div class="toolbar">
+      <input id="newword" placeholder="add a word…" autocomplete="off">
+      <select id="newcat">
+        <option value="profanity">profanity</option>
+        <option value="blasphemy">blasphemy</option>
+        <option value="crude">crude</option>
+        <option value="slur">slur</option>
+      </select>
+      <button id="addword">Add</button>
+    </div>
+    <div id="wordlist" class="chips"></div>
+  </section>
+
+  <!-- ----------------------------------------------------------- tag-sets -->
+  <section id="view-tagsets" class="view hidden">
+    <p class="muted">
+      This server cannot reach api.vidangel.com — it needs your logged-in session. Fetch
+      <code>https://api.vidangel.com/api/bff/tag-sets/&lt;id&gt;/</code> in your browser
+      and paste the JSON here; it is cached for reuse.
+    </p>
+    <div class="toolbar">
+      <input id="hint" placeholder="title hint, e.g. Community S01E02">
+    </div>
+    <textarea id="payload" rows="10" placeholder="paste tag-set JSON…"></textarea>
+    <button id="savetagset">Save tag-set</button>
+    <div id="tagsetmsg"></div>
+  </section>
+</main>
+
+<!-- ------------------------------------------------------------- run modal -->
+<div id="modal" class="modal hidden">
+  <div class="modal-box">
+    <button class="close" id="modalclose">&times;</button>
+    <h2 id="mtitle"></h2>
+    <div id="mbody"></div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

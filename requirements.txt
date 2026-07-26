@@ -1,0 +1,16 @@
+# Pinned to the versions this was developed and verified against.
+
+faster-whisper==1.2.1
+ctranslate2==4.8.1
+numpy==2.5.1
+
+fastapi==0.140.0
+uvicorn==0.51.0
+python-multipart==0.0.32
+
+# CUDA runtime libraries. ctranslate2 needs cuBLAS/cuDNN at *inference* time, not just
+# at model load — without them a CUDA model loads fine and then dies with
+# "cublas64_12.dll is not found". `align._register_cuda_dlls()` puts these on the
+# library search path, which is required on Windows and harmless on Linux.
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.24.0.43

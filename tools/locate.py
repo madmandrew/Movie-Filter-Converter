@@ -46,22 +46,49 @@ _EXACT_ONLY = {"ass", "hell", "damn", "god", "dick", "piss", "crap"}
 
 #: Legitimate words that contain a target as a substring; never match these.
 _FALSE_FRIENDS = {
+    # "ass"
     "class", "classes", "pass", "passed", "passing", "assignment", "assign",
     "assist", "assume", "assumed", "glass", "grass", "mass", "bass", "brass",
-    "embarrass", "harassment", "cassette", "assembly", "asset", "hello", "shell",
-    "shelter", "hellman", "damned",  # "damned" is handled via its own variant
-    "goddess", "gospel", "gone", "going", "good", "dickens", "dictionary",
+    "embarrass", "harassment", "cassette", "assembly", "asset", "assessment",
+    # "hell"
+    "hello", "shell", "shelter", "hellman", "michelle", "helluva",
+    # "damn" — note "damned" is NOT here: it is a real inflection, not a false friend.
+    # "dam" is deliberately absent too: it is a listed _SOFTENED stand-in for "damn".
+    "dame", "amsterdam",
+    # "god" / "christ" - "christmas" and "christian" are not blasphemy
+    "goddess", "gospel", "gone", "going", "good", "christmas", "christian",
+    "christina", "christopher", "godfather", "godmother", "godsend",
+    # "bull(shit)" - the stem matched "bullets", "bulletin", "bulldog"
+    "bullet", "bullets", "bulletin", "bulldog", "bulldoze", "bully", "bullies",
+    "bulk", "bullion",
+    # "dick" / "piss" / "crap"
+    "dickens", "dictionary", "dictate", "pistol", "crape", "scrap", "scraps",
 }
 
 
+#: Inflections a target may legitimately appear as. Explicit beats stemming: a 4-char
+#: prefix stem matched "bullets" from "bullshit" and "christmas" from "christ", and no
+#: blocklist can keep up with that. Only these suffixes are accepted, and only on a
+#: target long enough that the stem is unambiguous.
+_SUFFIXES = ("s", "es", "ed", "ing", "er", "ers", "y")
+
+
 def _variants(word: str) -> set[str]:
+    """Every spelling that counts as a hit for `word`.
+
+    Suffixes are added even for `_EXACT_ONLY` targets: "damned" and "pissed" are real
+    inflections that must match. `_EXACT_ONLY` exists to forbid *prefix* matching (which
+    is what turned "christ" into "christmas"), not to forbid inflection. Because every
+    accepted form is enumerated here, `_matches` can be a plain set lookup.
+    """
     n = _norm(word)
     out = {n}
     out.update(_SOFTENED.get(n, []))
-    # Whisper often drops the -ing/-ed inflection or emits a stem. Only safe for
-    # longer words; stemming "hell" or "ass" would match far too much.
-    if len(n) > 5 and n not in _EXACT_ONLY:
-        out.add(n[:4])
+    if len(n) >= 3:
+        out.update(n + suf for suf in _SUFFIXES)
+        # Consonant-doubling before a vowel suffix: piss -> pissed, sin -> sinning.
+        if len(n) >= 3 and n[-1] not in "aeiousxyz":
+            out.update(n + n[-1] + suf for suf in ("ed", "ing", "er", "y"))
     return out
 
 
@@ -79,18 +106,11 @@ def _matches(word_norm: str, targets: set[str]) -> bool:
     """
     if not word_norm or word_norm in _FALSE_FRIENDS or word_norm in _NEVER:
         return False
-    if word_norm in targets:
-        return True
-    for t in targets:
-        if not t or t in _EXACT_ONLY:
-            continue                      # exact match only, already checked above
-        if len(word_norm) < 3:
-            continue
-        # Allow inflection either direction ("fucking" vs "fuck") but require a
-        # substantial shared prefix so unrelated words cannot collide.
-        if (word_norm.startswith(t) or t.startswith(word_norm)) and min(len(t), len(word_norm)) >= 4:
-            return True
-    return False
+    # `targets` already contains every accepted inflection (see `_variants`), so an exact
+    # set membership test is the whole rule. Prefix/substring matching is deliberately
+    # NOT used: it produced "bullets" for "bullshit" and "christmas" for "christ", and a
+    # blocklist of innocent words that merely start with a swear word is unmaintainable.
+    return word_norm in targets
 
 
 @dataclass

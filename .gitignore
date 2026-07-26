@@ -32,3 +32,9 @@ __pycache__/
 # generated filter artifacts
 testdata/*.edl
 testdata/*.report.json
+
+# runtime state: sqlite db, run reports, cached model weights
+data/
+*.db
+*.db-wal
+*.db-shm
