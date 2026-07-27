@@ -131,16 +131,25 @@ def api_title(path: str):
         info["report"] = json.loads(info["report_json"])
     info.pop("report_json", None)
 
-    # Which cached tag-sets plausibly match this title, by name overlap.
+    # Which cached tag-sets to offer for this title.
+    #
+    # An explicitly linked tag-set (`titles.tag_set_id`) is ALWAYS offered and listed
+    # first. Name-overlap matching alone was hiding exactly the tag-sets the user had
+    # picked by hand: they pick manually *because* the filename does not resemble the
+    # catalogue title, so the same mismatch that forced the manual pick then filtered the
+    # result out of this list.
     rows = db.connect().execute(
         "SELECT tag_set_id, work_id, title_hint, runtime FROM tagsets"
     ).fetchall()
     name = (info.get("name") or "").lower()
+    linked_id = info.get("tag_set_id")
     matches = []
     for r in rows:
-        if r["title_hint"] and not _looks_like(r["title_hint"], name):
+        is_linked = linked_id is not None and r["tag_set_id"] == linked_id
+        if not is_linked and r["title_hint"] and not _looks_like(r["title_hint"], name):
             continue
         d = dict(r)
+        d["linked"] = is_linked
         # Pre-flight the wrong-master problem: a tag-set keyed to a different cut has
         # every timing offset, and no amount of per-word precision fixes that. Historical
         # cases in this library ran +11s and +12s. Surfacing the delta here means the user
@@ -151,6 +160,9 @@ def api_title(path: str):
             d["runtime_delta"] = round(delta, 1)
             d["same_cut"] = abs(delta) <= 10.0
         matches.append(d)
+    # Linked first, then closest runtime, so the dialog's default is the best guess.
+    matches.sort(key=lambda d: (not d.get("linked"),
+                                abs(d.get("runtime_delta") or 9e9)))
     info["tagsets"] = matches
     return info
 

@@ -305,8 +305,16 @@ async function openFilter(path) {
   let groupsHtml = '<p class="muted">No tag-set linked. The word-list scan still runs.</p>';
   let tsSelect = '<option value="">none</option>';
   if (t.tagsets?.length) {
-    tsSelect += t.tagsets.map((x) =>
-      `<option value="${x.tag_set_id}">#${x.tag_set_id} ${esc(x.title_hint || '')}</option>`).join('');
+    tsSelect += t.tagsets.map((x) => {
+      // Runtime delta is the wrong-cut pre-flight: a tag-set keyed to a different cut
+      // has every timing offset. The offset estimator corrects for it, but seeing the
+      // number up front explains an otherwise surprising result.
+      const delta = x.runtime_delta != null
+        ? ` — ${x.runtime_delta > 0 ? '+' : ''}${x.runtime_delta}s vs this file` : '';
+      const tag = x.linked ? ' ✓ linked' : '';
+      return `<option value="${x.tag_set_id}"${x.linked ? ' selected' : ''}
+        >#${x.tag_set_id} ${esc(x.title_hint || '')}${delta}${tag}</option>`;
+    }).join('');
   }
 
   $('#mbody').innerHTML = `
@@ -430,9 +438,9 @@ async function openFilter(path) {
     renderManual();
   });
 
-  $('#mts').addEventListener('change', async (e) => {
-    const id = e.target.value;
+  const loadGroups = async (id) => {
     if (!id) { $('#mgroups').innerHTML = groupsHtml; return; }
+    $('#mgroups').innerHTML = '<p class="muted">loading categories…</p>';
     const ts = await api(`/api/tagsets/${id}`);
     $('#mgroups').innerHTML = ts.groups.map((g) => {
       const kind = g.kind === 'audiovisual' ? 'video' : 'audio';
@@ -446,7 +454,12 @@ async function openFilter(path) {
                data-kind="${kind}" data-locatable="${g.locatable}">
         <span>${esc(g.title)} <code>(${n} ${kind})</code>${usable}</span></label>`;
     }).join('');
-  });
+  };
+
+  $('#mts').addEventListener('change', (e) => loadGroups(e.target.value));
+  // A preselected <option> fires no change event, so load the linked tag-set's
+  // categories explicitly — otherwise the list sits empty on a manually-picked match.
+  await loadGroups($('#mts').value);
 
   $('#mgo').addEventListener('click', async (e) => {
     e.target.disabled = true;
