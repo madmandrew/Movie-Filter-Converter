@@ -92,6 +92,34 @@ const promptDialog = (title, body, placeholder = '') =>
 
 /** Timecode. Includes hours past the hour mark — a feature-length title's incidents
  *  otherwise read as "75:24" or worse, "57:00" for what is really 00:57:00. */
+/** Copy text to the clipboard.
+ *
+ *  `navigator.clipboard` requires a secure context, which plain http:// on a LAN IP or
+ *  Unraid host is not — so it is simply absent there. Falls back to a hidden textarea
+ *  and execCommand, which is deprecated but the only thing that works over http.
+ */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.setAttribute('readonly', '');
+  // Keep it off-screen but focusable; display:none would break selection.
+  ta.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
+  document.body.appendChild(ta);
+  try {
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);
+    if (!document.execCommand('copy')) {
+      throw new Error('the browser refused the copy');
+    }
+  } finally {
+    ta.remove();
+  }
+}
+
 const tc = (s) => {
   if (s == null) return '';
   const h = Math.floor(s / 3600);
@@ -984,6 +1012,8 @@ async function loadLive() {
         ${stall}
         <button class="secondary livetoggle" data-id="${r.id}"
           style="margin-left:auto">${open ? 'Hide log' : 'Show log'}</button>
+        <button class="secondary livecopy" data-id="${r.id}"
+          title="Copy the full log to the clipboard">Copy log</button>
       </div>
       ${r.error ? `<div class="pill bad" style="display:block;white-space:normal;
         padding:.5rem;margin-top:.5rem">${esc(r.error.join(' '))}</div>` : ''}
@@ -999,6 +1029,27 @@ async function loadLive() {
     const id = String(b.dataset.id);
     if (liveOpen.has(id)) liveOpen.delete(id); else liveOpen.add(id);
     loadLive();
+  }));
+
+  $$('.livecopy').forEach((b) => b.addEventListener('click', async () => {
+    const id = b.dataset.id;
+    const original = b.textContent;
+    b.disabled = true;
+    b.textContent = 'copying…';
+    try {
+      // Fetch the whole log rather than copying the visible <pre>: the live view only
+      // renders the last 60 lines, so copying the element would silently truncate
+      // exactly when the log is long enough to be worth sharing.
+      const d = await api(`/api/runs/${id}/log`);
+      const text = d.lines.join('\n');
+      await copyText(text);
+      b.textContent = `copied ${d.total} lines`;
+      setTimeout(() => { b.textContent = original; b.disabled = false; }, 1800);
+    } catch (e) {
+      b.textContent = original;
+      b.disabled = false;
+      toast(`Could not copy log: ${e.message}`, 'error');
+    }
   }));
 
   // Restore scroll; if the user was at the bottom, keep them pinned to the newest line.
@@ -1109,9 +1160,28 @@ async function showRun(id) {
       </fieldset>` : ''}
     ${rep.render ? `<fieldset><legend>Render</legend>
       <div>${esc(rep.render.summary || '')}</div></fieldset>` : ''}
-    <fieldset><legend>Log</legend><pre class="log">${esc(r.log || '')}</pre></fieldset>`;
+    <fieldset><legend>Log</legend>
+      <div class="toolbar">
+        <button class="secondary" id="copylog" data-id="${r.id}">Copy log</button>
+      </div>
+      <pre class="log">${esc(r.log || '')}</pre></fieldset>`;
 
   $('#editrun')?.addEventListener('click', (e) => editRun(e.target.dataset.id));
+
+  $('#copylog')?.addEventListener('click', async (e) => {
+    const b = e.target;
+    const original = b.textContent;
+    b.disabled = true;
+    try {
+      await copyText(r.log || '');
+      b.textContent = `copied ${(r.log || '').trim().split('\n').length} lines`;
+      setTimeout(() => { b.textContent = original; b.disabled = false; }, 1800);
+    } catch (err) {
+      b.textContent = original;
+      b.disabled = false;
+      toast(`Could not copy log: ${err.message}`, 'error');
+    }
+  });
 
   $$('.dec').forEach((b) => b.addEventListener('click', async () => {
     await postJSON('/api/review', {
