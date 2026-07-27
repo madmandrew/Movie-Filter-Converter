@@ -553,6 +553,7 @@ async function openFilter(path, prefill = null) {
   const pf = {
     quality: 'splice', model: 'small.en', do_scan: true, only_enabled: false,
     detect_nudity: false, nudity_start: null, nudity_end: null,
+    trust_timestamps: false,
     categories: [], video_categories: [],
     audio_refs: [], video_refs: [], manual_mutes: [], manual_cuts: [],
     tag_set_id: null, videoskip_id: null, output_path: null, archive_path: null,
@@ -636,6 +637,11 @@ async function openFilter(path, prefill = null) {
         ${pf.only_enabled ? 'checked' : ''}>
         <span>Only tags already enabled in VidAngel
           <code>— use your existing selections instead of whole categories</code></span></label>
+      <label class="row"><input type="checkbox" id="mtrust"
+        ${pf.trust_timestamps ? 'checked' : ''}>
+        <span>Trust the tag's timestamps — skip Whisper
+          <code>— cuts the marked range as given; use for conversations, or when a
+          word isn't being found</code></span></label>
       <label class="row"><input type="checkbox" id="mnude"
         ${pf.detect_nudity ? 'checked' : ''}>
         <span>Scan video for nudity
@@ -921,6 +927,7 @@ async function openFilter(path, prefill = null) {
         do_scan: $('#mscan').checked,
         only_enabled: $('#monlyen').checked,
         detect_nudity: $('#mnude').checked,
+        trust_timestamps: $('#mtrust').checked,
         nudity_start: nudeStart,
         nudity_end: nudeEnd,
         model: $('#mmodel').value,

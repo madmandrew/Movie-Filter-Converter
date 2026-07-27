@@ -23,21 +23,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-#: Category keys that describe a *kind of content* rather than a spoken word. Searching
-#: the audio for "immodesty" or "violence" would find nothing, and worse, a match on the
-#: literal word would mute an innocent mention of it. Observed on real tag-sets.
-_NON_WORD_KEYS = frozenset({
-    "profanity", "blasphemy", "language", "language_racial", "language_childish",
-    "language_sexual", "immodesty", "immodesty_male", "immodesty_female",
-    "immodesty_both", "nudity", "nudity_male", "nudity_female", "sex_any",
-    "non_graphic", "graphic", "violence", "gore", "objectionable", "implied",
-    "implied_not_shown", "shown_w_nudity", "shown_w_o_nudity", "sexual_assault",
-    "sexually_suggestive", "vulgar_gestures", "bodily_functions", "human_functions",
-    "life_events", "credits", "opening_credits", "closing_credits",
-    "alcohol_or_drug_use", "drugs_legal", "drugs_implied", "drugs_illegal",
-    "smoking", "gambling", "occult", "disturbing", "intense", "scary",
-})
-
 #: Categories to act on. Deliberately narrow: the goal is muting individual swear
 #: words, NOT blanking whole phrases, sentences, or scenes. Prose-described tags
 #: ("A man makes a sexual reference about women.") name no word, so word-spotting
@@ -113,31 +98,32 @@ class Incident:
 
     @property
     def words(self) -> list[str]:
-        """Candidate spoken words, or [] if this incident has no specific word.
+        """What to search the audio for: the category name.
 
-        Falls back to the category key itself when it is not in `_WORD_KEYS`. VidAngel
-        names word categories after the word (`cock`, `jesus`, `bollocks`), so the key is
-        a good guess and keeps a newly-seen category locatable instead of silently
-        unusable — the map can never be exhaustive. `other_*` keys are prose descriptions
-        of an action, not words, so they stay empty.
+        For a VidAngel audio tag the category IS the word said — `ass`, `damn`, `cock`,
+        `jesus`, `wetback`. `_WORD_KEYS` only adds inflections and synonyms where useful
+        (`damn` also catching `dammit`), and an unmapped category simply searches for
+        itself. That covers every slur and regional insult without a curated list.
+
+        Categories naming an action rather than a word (`other_sexual`,
+        `bodily_functions`) will not be found by Whisper. They are not special-cased:
+        the search runs, fails, and the incident is reported as NOT_FOUND for a decision.
         """
-        mapped = _WORD_KEYS.get(self.category_key)
-        if mapped:
-            return mapped
-        key = self.category_key
-        if (key and not key.startswith("other")
-                and key not in _NON_WORD_KEYS and key.isalpha()):
-            return [key]
-        return []
+        # An underscored key ("bodily_functions", "other_sexual") is a placeholder for a
+        # kind of content, not a word. It is searched for verbatim and simply will not be
+        # found, which is the right outcome — deliberately NOT split into its parts, since
+        # searching for "sexual" would mute ordinary dialogue.
+        return _WORD_KEYS.get(self.category_key) or [self.category_key]
 
     @property
     def locatable(self) -> bool:
-        """True if word-spotting can find this incident.
+        """Is this an audio tag whose category plausibly names a word?
 
-        `other_*` categories carry only a prose description of the action, and
-        audiovisual tags may have no speech at all — neither is word-spottable.
+        A hint for the UI, not a gate: the search is attempted either way and reports
+        NOT_FOUND if the word is not there. `other_*` categories are placeholders whose
+        description is prose, so they are unlikely to succeed.
         """
-        return bool(self.words) and self.kind == "audio"
+        return self.kind == "audio" and not self.category_key.startswith("other")
 
     @property
     def is_structural(self) -> bool:

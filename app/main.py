@@ -785,6 +785,10 @@ class RunIn(BaseModel):
     #: its siblings alone.
     audio_refs: list[str] = []
     video_refs: list[str] = []
+    #: Skip Whisper verification and mute the tag's own timestamps as given. Useful for
+    #: incidents describing a conversation rather than a word, where there is nothing for
+    #: Whisper to find, and as an escape hatch when a word genuinely is not located.
+    trust_timestamps: bool = False
     words: list[str] | None = None
     manual_mutes: list[ManualMute] = []
     manual_cuts: list[ManualCut] = []

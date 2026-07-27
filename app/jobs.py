@@ -310,30 +310,29 @@ def _execute(run_id: int) -> None:
     else:
         report_offset = {}
 
+    trust_timestamps = bool(opts.get("trust_timestamps"))
+
+    def _use_tag_timing(inc, label: str, why: str) -> None:
+        """Mute the tag's own range, offset-corrected and frame-snapped, unverified."""
+        s = max(0.0, inc.start_approx + tag_offset)
+        e = max(inc.end_approx, inc.start_approx + 1.0) + tag_offset
+        s, e = snap_to_frames(s, e, fps)
+        mutes.append((inc.ref_id, s, e))
+        results.append({
+            "ref_id": inc.ref_id, "word": label, "bucket": inc.start_approx,
+            "start": round(s, 3), "end": round(e, 3),
+            "drift": round(tag_offset, 3),
+            "status": "OK_UNVERIFIED", "note": why,
+        })
+        _log(run_id, f"  {inc.ref_id} {label}: {why} — muting {s:.3f}-{e:.3f}")
+
     for n, inc in enumerate(todo):
-        # An incident may name no word at all — a category describing an action rather
-        # than something said. Indexing words[0] crashed the whole run on the first such
-        # incident, which selecting individual incidents by hand made easy to hit.
-        label = inc.words[0] if inc.words else (inc.category_key or "incident")
+        label = inc.words[0]
         _stage(run_id, f"locating {label} @{inc.start_approx:.0f}s",
                10 + 30 * n / max(1, len(todo)))
 
-        if not inc.words:
-            # Nothing to search for, so fall back to the tag's own timing rather than
-            # dropping it silently. Offset-corrected and frame-snapped, but unverified.
-            s = max(0.0, inc.start_approx + tag_offset)
-            e = max(inc.end_approx, inc.start_approx + 1.0) + tag_offset
-            s, e = snap_to_frames(s, e, fps)
-            mutes.append((inc.ref_id, s, e))
-            results.append({
-                "ref_id": inc.ref_id, "word": label, "bucket": inc.start_approx,
-                "start": round(s, 3), "end": round(e, 3),
-                "status": "OK_UNVERIFIED",
-                "note": f"'{inc.category_key}' names no searchable word; used the "
-                        f"tag's own timing (offset-corrected, not verified)",
-            })
-            _log(run_id, f"  {inc.ref_id} {label}: no searchable word, used tag timing "
-                         f"{s:.3f}-{e:.3f}")
+        if trust_timestamps:
+            _use_tag_timing(inc, label, "trusting the tag's timestamps (Whisper skipped)")
             continue
 
         w0, w1 = inc.search_window()
@@ -345,8 +344,18 @@ def _execute(run_id: int) -> None:
             if m and (best is None or m.confidence > best.confidence):
                 best = m
         if best is None:
-            results.append({"ref_id": inc.ref_id, "word": label,
-                            "bucket": inc.start_approx, "status": "NOT_FOUND"})
+            # Not found: skip and flag rather than mute blindly. Common and expected for
+            # a category naming an action ("other_sexual") — there is no word to hear.
+            # Re-run with "trust the tag's timestamps" to cut the marked range anyway.
+            results.append({
+                "ref_id": inc.ref_id, "word": label,
+                "bucket": inc.start_approx, "status": "NOT_FOUND",
+                "note": f"no '{label}' heard within ±{(w1 - w0) / 2:.0f}s of "
+                        f"{inc.start_approx + tag_offset:.0f}s — nothing muted. "
+                        f"Re-run with 'trust the tag's timestamps' to cut it anyway.",
+            })
+            _log(run_id, f"  {inc.ref_id} {label} @{inc.start_approx:.0f}s: NOT FOUND, "
+                         f"skipped")
             continue
         s, e, v, rounds = tighten(path, best.expected, best.start, best.end, fps,
                                   model=model)
