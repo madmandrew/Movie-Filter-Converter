@@ -90,10 +90,16 @@ const confirmDialog = (title, body, opts = {}) =>
 const promptDialog = (title, body, placeholder = '') =>
   dialog({ title, body, input: { placeholder }, okText: 'OK' });
 
+/** Timecode. Includes hours past the hour mark — a feature-length title's incidents
+ *  otherwise read as "75:24" or worse, "57:00" for what is really 00:57:00. */
 const tc = (s) => {
   if (s == null) return '';
-  const m = Math.floor(s / 60), sec = (s % 60);
-  return `${String(m).padStart(2, '0')}:${sec.toFixed(2).padStart(5, '0')}`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = sec.toFixed(2).padStart(5, '0');
+  return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 };
 
 /* ------------------------------------------------------------------- tabs */
@@ -104,7 +110,7 @@ $$('.tab').forEach((b) => b.addEventListener('click', () => {
   if (b.dataset.view === 'runs') loadRuns();
   if (b.dataset.view === 'words') loadWords();
   if (b.dataset.view === 'settings') loadSettings();
-  if (b.dataset.view === 'tagsets') loadTagsets();
+  if (b.dataset.view === 'tagsets') { loadTagsets(); loadSkipfiles(); }
 }));
 
 /* ---------------------------------------------------------------- library */
@@ -482,6 +488,10 @@ async function openFilter(path) {
 
   const t = await api(`/api/title?path=${encodeURIComponent(path)}`);
   const lossless = /hd ma|dts:x|truehd|atmos/i.test(t.audio_profile || '');
+  // The backend already parses release filenames (titleparse.py, covered by tests), so
+  // use its result rather than reimplementing the stop-token logic here and letting the
+  // two drift apart.
+  const searchTitle = t.parsed_title || t.name || '';
 
   let groupsHtml = '<p class="muted">No tag-set linked. The word-list scan still runs.</p>';
   let tsSelect = '<option value="">none</option>';
@@ -521,7 +531,21 @@ async function openFilter(path) {
         <select id="mts">${tsSelect}</select>
         <span class="muted">Pick a cached tag-set to filter specific tagged incidents.</span>
       </div>
+      <p class="muted">
+        Nothing here? Try the
+        <a href="https://videoskip.org/exchange/" target="_blank"
+           rel="noopener noreferrer">VideoSkip Exchange</a>
+        for a community skip file — search it for
+        <strong>${esc(searchTitle)}</strong>, download the file, then add it under
+        “Or paste a filter file” on the Tag-sets tab.
+      </p>
       <div id="mgroups">${groupsHtml}</div>
+    </fieldset>
+    <fieldset><legend>VideoSkip filter file</legend>
+      <div class="toolbar">
+        <select id="mvsk"><option value="">none</option></select>
+        <span class="muted">A saved skip file can drive mutes and cuts on its own.</span>
+      </div>
     </fieldset>
     <fieldset><legend>Word-list scan</legend>
       <label class="row"><input type="checkbox" id="mscan" checked>
@@ -623,19 +647,65 @@ async function openFilter(path) {
     if (!id) { $('#mgroups').innerHTML = groupsHtml; return; }
     $('#mgroups').innerHTML = '<p class="muted">loading categories…</p>';
     const ts = await api(`/api/tagsets/${id}`);
-    $('#mgroups').innerHTML = ts.groups.map((g) => {
+    // Each incident is listed individually with its own description and timestamp.
+    // A category checkbox alone hides the fact that "Sexually Suggestive" might be one
+    // scene worth cutting and two worth keeping — the descriptions are the only way to
+    // tell, and they are the whole reason for choosing per incident.
+    $('#mgroups').innerHTML = ts.groups.map((g, gi) => {
       const kind = g.kind === 'audiovisual' ? 'video' : 'audio';
       const n = g.incidents.length;
-      const usable = g.locatable
+      const note = g.locatable
         ? ''
         : ` <span class="pill warn">${kind === 'video'
-            ? 'video cut' : 'no specific word — cannot word-mute'}</span>`;
-      return `<label class="row">
-        <input type="checkbox" class="catbox" data-key="${esc(g.key)}"
-               data-kind="${kind}" data-locatable="${g.locatable}">
-        <span>${esc(g.title)} <code>(${n} ${kind})</code>${usable}</span></label>`;
+            ? 'video cut' : 'no specific word — muted as timed'}</span>`;
+      return `<details class="catgroup" ${n <= 6 ? 'open' : ''}>
+        <summary>
+          <label class="row" onclick="event.stopPropagation()">
+            <input type="checkbox" class="catbox" data-key="${esc(g.key)}"
+                   data-kind="${kind}" data-locatable="${g.locatable}"
+                   data-group="${gi}">
+            <span>${esc(g.title)} <code>(${n} ${kind})</code>${note}</span>
+          </label>
+        </summary>
+        <div class="incidents">
+          ${g.incidents.map((i) => `
+            <label class="row incident-row">
+              <input type="checkbox" class="incbox" data-group="${gi}"
+                     data-ref="${esc(i.ref_id)}" data-key="${esc(g.key)}"
+                     data-kind="${i.kind === 'audiovisual' ? 'video' : 'audio'}">
+              <span class="tcell">${tc(i.start)}${i.end > i.start
+                ? `–${tc(i.end)}` : ''}</span>
+              <span>${esc(i.description)}
+                ${i.enabled ? '<span class="pill ok">was on</span>' : ''}</span>
+            </label>`).join('')}
+        </div>
+      </details>`;
     }).join('');
+
+    // A category box selects every incident under it; unticking any one clears the
+    // category box so the two never disagree.
+    $$('.catbox').forEach((cb) => cb.addEventListener('change', () => {
+      $$(`.incbox[data-group="${cb.dataset.group}"]`)
+        .forEach((i) => { i.checked = cb.checked; });
+    }));
+    $$('.incbox').forEach((ib) => ib.addEventListener('change', () => {
+      const peers = $$(`.incbox[data-group="${ib.dataset.group}"]`);
+      const cb = $(`.catbox[data-group="${ib.dataset.group}"]`);
+      if (!cb) return;
+      cb.checked = peers.every((p) => p.checked);
+      cb.indeterminate = !cb.checked && peers.some((p) => p.checked);
+    }));
   };
+
+  // Saved skip files, offered as an alternative source to a VidAngel tag-set. Loaded
+  // after render so a failure here cannot block the rest of the dialog.
+  api('/api/skipfiles').then((d) => {
+    const sel = $('#mvsk');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">none</option>' + d.skipfiles.map((s) =>
+      `<option value="${s.id}">#${s.id} ${esc(s.title_hint || s.format)}
+        — ${s.audio_count} audio, ${s.video_count} video</option>`).join('');
+  }).catch(() => { /* leave the "none" option in place */ });
 
   $('#mts').addEventListener('change', (e) => loadGroups(e.target.value));
   // A preselected <option> fires no change event, so load the linked tag-set's
@@ -644,16 +714,27 @@ async function openFilter(path) {
 
   $('#mgo').addEventListener('click', async (e) => {
     e.target.disabled = true;
+    // Send individual refs, so picking 2 of 6 scenes in a category means exactly those
+    // two. Category keys still go along for the report and for the audio path's word
+    // lookup, but the refs are what decide.
     const audioCats = $$('.catbox').filter((c) => c.checked && c.dataset.locatable === 'true')
       .map((c) => c.dataset.key);
     const videoCats = $$('.catbox').filter((c) => c.checked && c.dataset.kind === 'video')
       .map((c) => c.dataset.key);
+    const chosen = $$('.incbox').filter((i) => i.checked);
+    const audioRefs = chosen.filter((i) => i.dataset.kind === 'audio')
+      .map((i) => i.dataset.ref);
+    const videoRefs = chosen.filter((i) => i.dataset.kind === 'video')
+      .map((i) => i.dataset.ref);
     try {
       const r = await postJSON('/api/runs', {
         path,
         tag_set_id: $('#mts').value ? Number($('#mts').value) : null,
+        videoskip_id: $('#mvsk')?.value ? Number($('#mvsk').value) : null,
         categories: audioCats,
         video_categories: videoCats,
+        audio_refs: audioRefs,
+        video_refs: videoRefs,
         quality: $('input[name=q]:checked').value,
         do_scan: $('#mscan').checked,
         only_enabled: $('#monlyen').checked,
@@ -974,6 +1055,44 @@ $('#vafetch').addEventListener('click', async (e) => {
     $('#vafetchmsg').innerHTML = `<div class="pill bad" style="white-space:normal;
       display:block;padding:.5rem">${esc(err.message)}</div>
       <p class="muted">Pasting the JSON below always works.</p>`;
+  } finally {
+    e.target.disabled = false;
+  }
+});
+
+async function loadSkipfiles() {
+  const d = await api('/api/skipfiles');
+  $('#sklist tbody').innerHTML = d.skipfiles.map((s) => `<tr>
+      <td class="num">${s.id}</td>
+      <td>${esc(s.title_hint || '—')}</td>
+      <td class="muted">${esc(s.format)}</td>
+      <td class="num">${s.audio_count}</td>
+      <td class="num">${s.video_count}</td>
+      <td class="muted">${esc((s.added_at || '').replace('T', ' '))}</td>
+      <td><button class="secondary skdel" data-id="${s.id}">Remove</button></td>
+    </tr>`).join('')
+    || '<tr><td colspan="7" class="muted">None saved yet.</td></tr>';
+
+  $$('.skdel').forEach((b) => b.addEventListener('click', async () => {
+    await api(`/api/skipfiles/${b.dataset.id}`, { method: 'DELETE' });
+    loadSkipfiles();
+  }));
+}
+
+$('#saveskip').addEventListener('click', async (e) => {
+  const payload = $('#skpayload').value.trim();
+  if (!payload) return;
+  e.target.disabled = true;
+  try {
+    const r = await postJSON('/api/skipfiles',
+      { payload, title_hint: $('#skhint').value.trim() || null });
+    $('#skipmsg').innerHTML = `<span class="pill ok">saved #${r.id} (${esc(r.format)}):
+      ${r.audio} audio, ${r.video} video</span>`;
+    $('#skpayload').value = '';
+    $('#skhint').value = '';
+    await loadSkipfiles();
+  } catch (err) {
+    $('#skipmsg').innerHTML = `<span class="pill bad">${esc(err.message)}</span>`;
   } finally {
     e.target.disabled = false;
   }

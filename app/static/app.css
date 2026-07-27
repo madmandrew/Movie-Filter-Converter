@@ -252,6 +252,40 @@ pre.log {
 }
 #dialog input { width: 100%; margin-top: .75rem; }
 
+/* --- per-incident tag-set selection --- */
+.catgroup { border-bottom: 1px solid var(--line); padding: .15rem 0; }
+.catgroup:last-child { border-bottom: 0; }
+.catgroup > summary { cursor: pointer; list-style: none; padding: .1rem 0; }
+.catgroup > summary::-webkit-details-marker { display: none; }
+/* A disclosure caret drawn on the summary itself, so the whole row stays clickable
+   while the checkbox inside it keeps its own hit area. */
+.catgroup > summary::before {
+  content: "▸";
+  color: var(--muted);
+  display: inline-block;
+  width: 1rem;
+  transition: transform .12s ease;
+}
+.catgroup[open] > summary::before { transform: rotate(90deg); }
+.catgroup > summary > label { display: inline-flex; }
+.incidents {
+  margin: .2rem 0 .5rem 1.9rem;
+  border-left: 2px solid var(--line);
+  padding-left: .7rem;
+}
+.incident-row { align-items: flex-start; gap: .5rem; padding: .22rem 0; }
+.incident-row .tcell {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: .88em;
+  white-space: nowrap;
+  min-width: 6.5rem;
+}
+.incident-row:hover { background: var(--panel-2); border-radius: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .catgroup > summary::before { transition: none; }
+}
+
 .hit { border-bottom: 1px solid var(--line); padding: .6rem 0; }
 .hit .ctx { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
 .hit .ctx b { color: var(--warn); }

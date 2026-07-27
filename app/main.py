@@ -131,6 +131,16 @@ def api_title(path: str):
         info["report"] = json.loads(info["report_json"])
     info.pop("report_json", None)
 
+    # The cleaned-up title, so the UI can seed external searches (VideoSkip, etc.) without
+    # duplicating the release-filename parsing in JS.
+    import titleparse
+
+    parsed = titleparse.parse(info.get("name") or "")
+    info["parsed_title"] = parsed.title
+    info["parsed_year"] = parsed.year
+    info["parsed_season"] = parsed.season
+    info["parsed_episode"] = parsed.episode
+
     # Which cached tag-sets to offer for this title.
     #
     # An explicitly linked tag-set (`titles.tag_set_id`) is ALWAYS offered and listed
@@ -765,6 +775,11 @@ class RunIn(BaseModel):
     tag_set_id: int | None = None
     categories: list[str] = []
     video_categories: list[str] = []
+    #: Individual incidents chosen by ref_id. When present these take precedence over
+    #: whole-category selection, so a user can take one scene from a category and leave
+    #: its siblings alone.
+    audio_refs: list[str] = []
+    video_refs: list[str] = []
     words: list[str] | None = None
     manual_mutes: list[ManualMute] = []
     manual_cuts: list[ManualCut] = []
@@ -810,7 +825,8 @@ def api_run(body: RunIn):
     if opts["words"] is None:
         opts["words"] = db.enabled_words()
 
-    if not (opts["categories"] or opts["video_categories"] or opts["manual_mutes"]
+    if not (opts["categories"] or opts["video_categories"] or opts["audio_refs"]
+            or opts["video_refs"] or opts["manual_mutes"]
             or opts["manual_cuts"] or opts["videoskip_id"] or opts["detect_nudity"]
             or (opts["do_scan"] and opts["words"])):
         raise HTTPException(400, "nothing to filter: pick categories, add a manual "

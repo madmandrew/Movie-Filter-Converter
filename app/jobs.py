@@ -161,10 +161,18 @@ def _execute(run_id: int) -> None:
 
     # ---- audio incidents from the tag-set ---------------------------------------
     todo = []
+    audio_refs = set(opts.get("audio_refs") or [])
     if ts:
         pool = ts.enabled() if opts.get("only_enabled") else ts.incidents
-        todo = [i for i in pool if i.category_key in categories]
-    _log(run_id, f"{len(todo)} tagged audio incidents in {categories}")
+        if audio_refs:
+            # Individually-chosen incidents. Selecting one scene from a category and
+            # leaving its siblings alone is only expressible per ref_id — a category
+            # name cannot say "this rape reference but not that one".
+            todo = [i for i in pool if i.ref_id in audio_refs and i.kind == "audio"]
+        else:
+            todo = [i for i in pool if i.category_key in categories]
+    _log(run_id, f"{len(todo)} tagged audio incidents "
+                 f"({'by ref' if audio_refs else str(categories)})")
 
     # Estimate the source-to-file offset BEFORE locating anything.
     #
@@ -399,7 +407,8 @@ def _execute(run_id: int) -> None:
     # ---- video ranges -----------------------------------------------------------
     video_ranges: list[dict] = []
     manual_cuts = opts.get("manual_cuts") or []
-    want_tagged_video = bool(ts and opts.get("video_categories"))
+    want_tagged_video = bool(
+        ts and (opts.get("video_categories") or opts.get("video_refs")))
 
     # NudeNet discovery. Advisory like the word scan: a classifier has no notion of
     # narrative context, so detections are surfaced for a decision rather than cut
@@ -471,10 +480,14 @@ def _execute(run_id: int) -> None:
         vr = []
         if want_tagged_video:
             wanted = set(opts["video_categories"])
+            video_refs = set(opts.get("video_refs") or [])
             for inc in ts.incidents:
                 if inc.kind != "audiovisual" or inc.is_structural:
                     continue
-                if inc.category_key not in wanted and inc.category_title not in wanted:
+                if video_refs:
+                    if inc.ref_id not in video_refs:
+                        continue
+                elif inc.category_key not in wanted and inc.category_title not in wanted:
                     continue
                 # Video ranges cannot be located by transcription, so they rely entirely
                 # on the offset estimated from the audio tags. Without it a wrong-cut

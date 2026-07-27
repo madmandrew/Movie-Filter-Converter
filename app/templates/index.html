@@ -143,6 +143,28 @@
       <div id="tagsetmsg"></div>
     </fieldset>
 
+    <fieldset><legend>VideoSkip / EDL filter files</legend>
+      <p class="muted">
+        For titles VidAngel doesn't cover. Grab a community skip file from the
+        <a href="https://videoskip.org/exchange/" target="_blank"
+           rel="noopener noreferrer">VideoSkip Exchange</a>
+        and paste it here — <code>.vsk</code>, EDL and JSON are all accepted.
+        Audio entries naming a word are located precisely in your own audio rather
+        than trusted as written.
+      </p>
+      <div class="toolbar">
+        <input id="skhint" placeholder="title hint, e.g. The Matrix (1999)">
+      </div>
+      <textarea id="skpayload" rows="7"
+        placeholder="00:05:11.269 --> 00:05:11.520&#10;Profane Word 1 (hell)&#10;&#10;…"></textarea>
+      <button id="saveskip">Save filter file</button>
+      <div id="skipmsg"></div>
+      <table id="sklist" style="margin-top:.8rem"><thead><tr>
+        <th>ID</th><th>Title</th><th>Format</th><th>Audio</th><th>Video</th>
+        <th>Added</th><th></th>
+      </tr></thead><tbody></tbody></table>
+    </fieldset>
+
     <fieldset><legend>Cached tag-sets</legend>
       <table id="tslist"><thead><tr>
         <th>ID</th><th>Title hint</th><th>Runtime</th><th>Added</th><th></th>
