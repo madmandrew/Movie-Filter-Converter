@@ -265,14 +265,39 @@ precisely), an explicit mute range, or a video cut with optional scene snapping.
   `display` rule at equal specificity *after* `.hidden` will win — `.hidden` is
   `!important` for exactly that reason.
 
+## Next session — requested by the user (2026-07-27)
+
+1. **Auto-pull VidAngel filters.** The pieces exist and are verified (search → resolve →
+   fetch, see `app/vidangel_client.py`); what is missing is doing it *without being asked*
+   — on library scan, or when a title is opened, match it to a work and fetch the
+   matching tag-set automatically. Needs a title-matching heuristic better than the
+   current `_looks_like`, and a decision about which offering to fetch when several exist
+   (probably all of them: the offset estimator makes the choice unimportant, and runtimes
+   let the UI show which is closest).
+2. **Link to videoskip.com** from the UI, for manually grabbing a filter when VidAngel has
+   nothing. The parser and upload path already work; this is a convenience link plus
+   guidance, ideally pre-filled with the title being filtered.
+3. **Tailscale.** Blocked on the user: the winget install stalls on a UAC prompt this
+   session cannot click, and login is interactive. Once installed, rebind the server from
+   `127.0.0.1` to `0.0.0.0` and keep basic auth on. Also wants it on the Unraid server.
+   The Cloudflare quick tunnel is the stopgap and it dies every few hours.
+4. **Filter popup adjustments** — user has specific changes in mind, unspecified. Ask
+   before redesigning.
+
 ## Not done / next up
 
 - **The Docker image has never been built or run.** GPU passthrough on Unraid is
   unverified; `/api/health` reports which device Whisper actually got.
-- **Only ever run on one episode.** The +2.5 s drift pattern may not hold across titles,
-  and the wrong-master cases from `offsets.txt` (godfather +12 s, 8 Mile +11 s) have not
-  been tested against this pipeline at all — a 12 s offset exceeds the ±7 s search window,
-  so the `runtime_unaltered` pre-flight would flag it but nothing corrects for it yet.
+- **Only ever run on one episode** (Community S01E02). Behaviour across titles with
+  different audio characteristics is unmeasured.
+- **Wrong-cut sources are handled** — `tools/offset.py` estimates the source-to-file offset
+  from the scan and was verified exact to 0.0000s up to +250s, with a −45s shifted tag-set
+  locating 5/5 through the full pipeline. The old `offsets.txt` notes were stale guesses
+  and are no longer treated as data; the measurement comes from the files.
+- **A read-only media mount blocks runs.** The default archive path resolves under the
+  media root, so filtering anything on the SMB share needs either a writable archive
+  location in Settings or a writable share. The run fails loudly rather than producing a
+  filtered file with no archive.
 - **`model="small.en"` is unvalidated as a choice** — `medium.en` may improve recall on
   the harder cases and fits in 4 GB VRAM. Untested.
 - **Test coverage is one file** (`tests/test_matcher.py`, 62 cases). The pipeline,
