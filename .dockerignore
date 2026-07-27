@@ -1,0 +1,22 @@
+# The build context is only requirements.txt, tools/ and app/. Everything else is
+# excluded — .venv alone is 2.4 GB and would be uploaded to the daemon on every build.
+.venv/
+.git/
+.idea/
+.claude/
+
+__pycache__/
+*.pyc
+*.pyo
+
+# Local run artifacts: SQLite DB, reports, sample tag-sets, scratch output.
+data/
+testdata/
+tests/
+*.db
+*.mkv
+*.mp4
+*.wav
+*.flac
+
+*.md

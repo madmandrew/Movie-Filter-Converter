@@ -1247,14 +1247,20 @@ def api_archive_preview(path: str, template: str | None = None,
 
 @app.get("/api/health")
 def api_health():
-    """Report GPU availability — the single most useful diagnostic on a new deploy."""
-    gpu, detail = False, "not checked"
+    """Report GPU availability — the single most useful diagnostic on a new deploy.
+
+    `get_model` already proves the GPU by running a real inference and silently falls
+    back to CPU, so the only question left here is which device it settled on. That
+    comes from the ctranslate2 model itself; anything else is a guess.
+    """
+    gpu, device, detail = False, "unknown", "not checked"
     try:
         from align import get_model
 
         m = get_model("tiny.en")
-        gpu = "cuda" in str(getattr(m, "model", "")).lower() or True
+        device = str(getattr(getattr(m, "model", None), "device", "unknown")).lower()
+        gpu = device.startswith("cuda")
         detail = "model loaded"
     except Exception as exc:  # noqa: BLE001
         detail = f"{type(exc).__name__}: {exc}"
-    return {"gpu_ok": gpu, "detail": detail, "db": db.db_path()}
+    return {"gpu_ok": gpu, "device": device, "detail": detail, "db": db.db_path()}
