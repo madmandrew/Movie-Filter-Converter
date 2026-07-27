@@ -185,6 +185,107 @@ def match_one(path: str, name: str, duration: float | None = None,
     return res
 
 
+def fetch_for_work(path: str, name: str, work_id: int, kind: str = "",
+                   duration: float | None = None,
+                   tag_set_id: int | None = None) -> MatchResult:
+    """Fetch filters for a work the user picked, bypassing the score threshold.
+
+    Used when automatic matching was not confident enough — the user has looked at the
+    candidates and decided, so their choice is authoritative. `tag_set_id` may be given
+    directly to skip resolution when the user picked a specific offering.
+    """
+    token = _token()
+    if not token:
+        return MatchResult(path, name, "error", "no VidAngel token saved")
+
+    p = titleparse.parse(name)
+    entry_label = name
+
+    if tag_set_id is None:
+        try:
+            entries = vac.resolve_tagsets(work_id, token, kind=kind)
+        except vac.FetchError as exc:
+            return MatchResult(path, str(p), "error", f"resolve failed: {exc}",
+                               work_id=work_id)
+        entry = _pick_entry(entries, p)
+        if entry is None:
+            want = (f"S{p.season:02d}E{p.episode:02d}" if p.is_episode else "this title")
+            return MatchResult(path, str(p), "none",
+                               f"no entry for {want} under that work", work_id=work_id)
+        if not entry.tag_set_ids:
+            return MatchResult(path, str(p), "none",
+                               "no tag-sets published for that entry", work_id=work_id)
+        tag_set_id = _pick_tagset(entry.tag_set_ids, duration, token)
+        entry_label = entry.label
+
+    try:
+        _tsid, raw = vac.fetch_tagset(str(tag_set_id), token)
+    except vac.FetchError as exc:
+        return MatchResult(path, str(p), "error", f"fetch failed: {exc}",
+                           work_id=work_id)
+
+    import vidangel as va
+
+    parsed_ts = va.parse(raw)
+    with db.tx() as c:
+        c.execute(
+            """INSERT INTO tagsets(tag_set_id, work_id, title_hint, runtime, payload,
+                                   added_at)
+               VALUES (?,?,?,?,?,datetime('now'))
+               ON CONFLICT(tag_set_id) DO UPDATE SET
+                   payload=excluded.payload, title_hint=excluded.title_hint,
+                   runtime=excluded.runtime""",
+            (parsed_ts.tag_set_id, parsed_ts.work_id, entry_label,
+             parsed_ts.runtime_unaltered, raw),
+        )
+        c.execute("UPDATE titles SET tag_set_id=? WHERE path=?",
+                  (parsed_ts.tag_set_id, path))
+
+    detail = f"{entry_label} — {len(parsed_ts.incidents)} incidents (picked manually)"
+    if duration and parsed_ts.runtime_unaltered:
+        detail += f", runtime delta {duration - parsed_ts.runtime_unaltered:+.0f}s"
+    res = MatchResult(path, str(p), "fetched", detail, work_id=work_id,
+                      tag_set_id=parsed_ts.tag_set_id, score=100)
+    _cache_put(path, res)
+    return res
+
+
+def candidates_for(path: str, name: str, query: str | None = None) -> dict:
+    """Search results for a title, scored against the filename, for manual selection.
+
+    `query` overrides the parsed title — release naming does not always resemble the
+    catalogue's, so the user needs to be able to retype it.
+    """
+    token = _token()
+    if not token:
+        raise ValueError("no VidAngel token saved")
+
+    p = titleparse.parse(name)
+    q = (query or p.title).strip()
+    if not q:
+        raise ValueError("nothing to search for")
+
+    hits = vac.search(q, token)
+    scored = sorted(
+        ((titleparse.score_match(p, h.title, h.year), h) for h in hits),
+        key=lambda x: (-x[0], not x[1].filterable),
+    )
+    return {
+        "query": q,
+        "parsed": str(p),
+        "parsed_title": p.title,
+        "season": p.season,
+        "episode": p.episode,
+        "results": [
+            {"work_id": h.work_id, "title": h.title, "year": h.year, "kind": h.kind,
+             "tag_count": h.tag_count, "filterable": h.filterable,
+             "reason": h.reason, "score": s,
+             "auto": s >= titleparse.AUTO_THRESHOLD and h.filterable}
+            for s, h in scored[:25]
+        ],
+    }
+
+
 def _pick_entry(entries: list, p: titleparse.ParsedTitle):
     """Choose the episode matching the filename, or the sole movie entry."""
     if not entries:

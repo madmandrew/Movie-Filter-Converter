@@ -78,28 +78,134 @@ async function loadLibrary() {
     try {
       const r = await postJSON('/api/vidangel/autofetch',
         { path: b.dataset.path, force: true });
-      await loadLibrary();
-      if (r.status !== 'fetched') alert(`${r.status}: ${r.detail}`);
+      if (r.status === 'fetched') {
+        await loadLibrary();
+      } else {
+        // Anything short of a confident match goes straight to manual selection,
+        // pre-seeded with whatever the filename parsed to.
+        openPicker(b.dataset.path);
+      }
     } catch (e) {
       alert(e.message);
       b.disabled = false;
       b.textContent = 'Find';
     }
   }));
+  $$('.afpick').forEach((b) =>
+    b.addEventListener('click', () => openPicker(b.dataset.path)));
 }
 
-/** VidAngel column: a cached tag-set, a known-negative answer, or a lookup button. */
+/** VidAngel column: a cached tag-set, a known-negative answer, or a lookup control.
+ *  Anything unresolved is clickable — an automatic answer that fell short is a starting
+ *  point for a manual pick, not a dead end. */
 function vidangelCell(t) {
   if (t.has_tagset) return '<span class="pill ok">yes</span>';
   const s = t.autofetch_status;
-  if (s === 'unfilterable') {
-    return `<span class="pill bad" title="${esc(t.autofetch_detail || '')}">none</span>`;
-  }
-  if (s === 'none') return '<span class="pill muted">no match</span>';
-  if (s === 'suggested') {
-    return `<span class="pill warn" title="${esc(t.autofetch_detail || '')}">check</span>`;
-  }
+  const pick = (label, cls, title) =>
+    `<button class="secondary afpick ${cls}" data-path="${esc(t.path)}"
+       title="${esc(title || '')}">${label}</button>`;
+
+  if (s === 'unfilterable') return pick('none', '', t.autofetch_detail);
+  if (s === 'none') return pick('no match', '', t.autofetch_detail);
+  if (s === 'suggested') return pick('check…', '', t.autofetch_detail);
+  if (s === 'error') return pick('retry', '', t.autofetch_detail);
   return `<button class="secondary afone" data-path="${esc(t.path)}">Find</button>`;
+}
+
+/* --------------------------------------------------- manual VidAngel match picker */
+async function openPicker(path, initialQuery) {
+  modal.classList.remove('hidden');
+  $('#mtitle').textContent = 'Find VidAngel filters';
+  $('#mbody').innerHTML = '<p class="muted">searching…</p>';
+
+  const load = async (q) => {
+    $('#pkresults').innerHTML = '<p class="muted">searching…</p>';
+    try {
+      const url = `/api/vidangel/candidates?path=${encodeURIComponent(path)}`
+        + (q ? `&q=${encodeURIComponent(q)}` : '');
+      const d = await api(url);
+      $('#pkquery').value = d.query;
+      renderResults(d);
+    } catch (e) {
+      $('#pkresults').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+    }
+  };
+
+  const renderResults = (d) => {
+    if (!d.results.length) {
+      $('#pkresults').innerHTML =
+        '<p class="muted">No results. Try a shorter or differently-worded title.</p>';
+      return;
+    }
+    const ep = (d.season != null && d.episode != null)
+      ? `<p class="muted">Filename names S${String(d.season).padStart(2, '0')}E${String(d.episode).padStart(2, '0')} — the matching episode is selected automatically once you pick the show.</p>`
+      : '';
+    $('#pkresults').innerHTML = ep + `
+      <table><thead><tr>
+        <th>Title</th><th>Year</th><th>Type</th><th>Tags</th><th>Match</th><th></th>
+      </tr></thead><tbody>
+      ${d.results.map((r) => `<tr>
+        <td>${esc(r.title)}</td>
+        <td class="num muted">${r.year ?? ''}</td>
+        <td class="muted">${esc(r.kind)}</td>
+        <td class="num">${r.tag_count || ''}</td>
+        <td><span class="pill ${r.score >= 90 ? 'ok' : r.score >= 50 ? 'warn' : ''}"
+              >${r.score}</span></td>
+        <td>${r.filterable
+              ? `<button class="pkuse" data-work="${r.work_id}"
+                   data-kind="${esc(r.kind)}">Use this</button>`
+              : `<span class="pill bad" title="${esc(r.reason)}">no filters</span>`}</td>
+      </tr>`).join('')}</tbody></table>`;
+
+    $$('.pkuse').forEach((b) => b.addEventListener('click', async () => {
+      $$('.pkuse').forEach((x) => { x.disabled = true; });
+      b.textContent = 'fetching…';
+      try {
+        const r = await postJSON('/api/vidangel/pick', {
+          path, work_id: Number(b.dataset.work), kind: b.dataset.kind,
+        });
+        if (r.status === 'fetched') {
+          closeModal();
+          await loadLibrary();
+        } else {
+          alert(`${r.status}: ${r.detail}`);
+          $$('.pkuse').forEach((x) => { x.disabled = false; });
+          b.textContent = 'Use this';
+        }
+      } catch (e) {
+        alert(e.message);
+        $$('.pkuse').forEach((x) => { x.disabled = false; });
+        b.textContent = 'Use this';
+      }
+    }));
+  };
+
+  $('#mbody').innerHTML = `
+    <p class="muted" id="pkfile"></p>
+    <div class="toolbar">
+      <input id="pkquery" placeholder="search VidAngel…" style="flex:1 1 22rem">
+      <button id="pksearch">Search</button>
+      <button id="pkmanual" class="secondary">Enter tag-set id…</button>
+    </div>
+    <div id="pkresults"></div>`;
+
+  $('#pkfile').textContent = path.split(/[\\/]/).pop();
+  $('#pksearch').addEventListener('click', () => load($('#pkquery').value.trim()));
+  $('#pkquery').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') load($('#pkquery').value.trim());
+  });
+  $('#pkmanual').addEventListener('click', async () => {
+    const id = prompt('VidAngel tag-set id (from the filters request on vidangel.com):');
+    if (!id || !/^\d+$/.test(id.trim())) return;
+    try {
+      const r = await postJSON('/api/vidangel/pick',
+        { path, tag_set_id: Number(id.trim()) });
+      if (r.status === 'fetched') { closeModal(); await loadLibrary(); }
+      else alert(`${r.status}: ${r.detail}`);
+    } catch (e) { alert(e.message); }
+  });
+
+  await load(initialQuery);
 }
 
 $('#q').addEventListener('input', () => {

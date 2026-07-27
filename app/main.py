@@ -288,6 +288,59 @@ def api_autofetch_status():
             "totals": {r["status"]: r["n"] for r in rows}}
 
 
+@app.get("/api/vidangel/candidates")
+def api_candidates(path: str, q: str | None = None):
+    """Search results for one title, scored against its filename, for manual picking.
+
+    `q` overrides the parsed title, since release naming often differs from the
+    catalogue's ("The.X.Files.I.Want.to.Believe" vs "The X-Files: I Want to Believe").
+    """
+    import autofetch as af
+
+    row = db.connect().execute(
+        "SELECT name FROM titles WHERE path=?", (path,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown title")
+    try:
+        return af.candidates_for(path, row["name"], q)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except vac.FetchError as exc:
+        raise HTTPException(502, str(exc))
+
+
+class PickIn(BaseModel):
+    path: str
+    work_id: int | None = None
+    kind: str = ""
+    tag_set_id: int | None = None     # skip resolution when a specific one is chosen
+
+
+@app.post("/api/vidangel/pick")
+def api_pick(body: PickIn):
+    """Attach a user-chosen VidAngel work (or tag-set) to a title.
+
+    Bypasses the automatic score threshold: the user has seen the candidates and decided,
+    so their choice wins.
+    """
+    import autofetch as af
+
+    if body.work_id is None and body.tag_set_id is None:
+        raise HTTPException(400, "provide work_id or tag_set_id")
+    row = db.connect().execute(
+        "SELECT name, duration FROM titles WHERE path=?", (body.path,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown title")
+
+    res = af.fetch_for_work(body.path, row["name"], body.work_id or 0,
+                            kind=body.kind, duration=row["duration"],
+                            tag_set_id=body.tag_set_id)
+    if res.status == "error":
+        raise HTTPException(502, res.detail)
+    return {"status": res.status, "detail": res.detail,
+            "tag_set_id": res.tag_set_id, "work_id": res.work_id}
+
+
 @app.get("/api/vidangel/suggestions")
 def api_suggestions(limit: int = 100):
     """Titles whose best match scored too low to fetch automatically."""
