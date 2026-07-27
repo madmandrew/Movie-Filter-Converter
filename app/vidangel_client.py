@@ -21,15 +21,31 @@ from dataclasses import dataclass
 
 DEFAULT_API = "https://api.vidangel.com/api/bff/tag-sets/{id}/"
 
-#: Header templates to try, in order. VidAngel's own client sends a bearer token, but
-#: token-style APIs vary and the user may paste a cookie value instead, so try the
-#: plausible forms rather than failing on the first.
+#: Title search. Verified working 2026-07-26. Returns three branches:
+#:   "titles"               - filterable results, best matches first. Each carries
+#:                            id (work_id), title, year, slug, type, tag_count.
+#:   "unavailable.titles"   - titles VidAngel cannot filter, each with a `reason`.
+#:                            A definitive negative: no point hunting further.
+#:   "available"            - only aggregate facets (top_keywords, top_actors), NOT titles.
+SEARCH_API = "https://api.vidangel.com/api/content/search/?q={query}"
+
+#: Header templates to try, in order.
+#:
+#: **`Token <hex>` is the one that works** — verified against the live API on 2026-07-26.
+#: VidAngel runs Django REST Framework, whose stock TokenAuthentication expects exactly
+#: this. The others are kept as fallbacks in case a different credential type is pasted.
 AUTH_SCHEMES = (
-    ("Authorization", "Bearer {token}"),
     ("Authorization", "Token {token}"),
+    ("Authorization", "Bearer {token}"),
     ("Authorization", "JWT {token}"),
     ("Cookie", "{token}"),
 )
+
+#: A 401 whose body says credentials were *not provided* means the header form was wrong,
+#: not that the token is bad — DRF reports an unrecognised scheme as anonymous. Detecting
+#: that lets the next scheme be tried instead of aborting, which is what made a valid
+#: `Token …` credential look expired.
+_NOT_PROVIDED_MARKERS = ("were not provided", "anonymoususer", "notauthenticated")
 
 #: Patterns that yield a tag-set or work id from a pasted URL. VidAngel watch URLs are
 #: not the tag-set endpoint, so a numeric id is extracted and tried against the API.
@@ -84,6 +100,90 @@ def parse_url(url: str) -> ParsedTarget:
     return ParsedTarget(found[0] if found else None, found, text)
 
 
+@dataclass
+class SearchHit:
+    work_id: int
+    title: str
+    year: int | None
+    kind: str                 # "movie" | "show" | ...
+    slug: str = ""
+    tag_count: int = 0
+    filterable: bool = True
+    reason: str = ""
+
+
+def search(query: str, token: str | None, timeout: float = 20.0) -> list[SearchHit]:
+    """Search VidAngel by title.
+
+    Returns filterable results first, then unfilterable ones flagged `filterable=False`
+    with VidAngel's stated reason — a definitive "this title cannot be filtered" is more
+    useful than an empty result, since it stops the user looking further.
+
+    Note the `available` branch contains only facets (keywords, actors), not titles; the
+    real matches are in the top-level `titles` list.
+    """
+    from urllib.parse import quote
+
+    url = SEARCH_API.format(query=quote(query))
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; MovieFilter/1.0)",
+    })
+    if token:
+        req.add_header("Authorization", f"Token {token}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        raise FetchError(f"search failed (HTTP {exc.code})", status=exc.code,
+                         body=_redact(body, token)) from None
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise FetchError(f"search failed: {_redact(str(exc), token)}") from None
+
+    hits: list[SearchHit] = []
+    for t in data.get("titles") or []:
+        if not isinstance(t, dict):
+            continue
+        hits.append(SearchHit(
+            work_id=int(t.get("id") or 0), title=str(t.get("title") or ""),
+            year=t.get("year"), kind=str(t.get("type") or ""),
+            slug=str(t.get("slug") or ""), tag_count=int(t.get("tag_count") or 0),
+            filterable=True,
+        ))
+    for t in ((data.get("unavailable") or {}).get("titles") or []):
+        if not isinstance(t, dict):
+            continue
+        hits.append(SearchHit(
+            work_id=int(t.get("id") or 0), title=str(t.get("title") or ""),
+            year=t.get("year"), kind=str(t.get("type") or ""),
+            filterable=False,
+            reason=str(t.get("reason") or t.get("request_reason") or ""),
+        ))
+    return hits
+
+
+def relevance(hit: SearchHit, query: str) -> int:
+    """Rough match score, so an exact title beats a substring coincidence.
+
+    VidAngel's search is loose — a query for "8 Mile" returns "18 Again" and "180" — so
+    results need reordering before they are shown.
+    """
+    q = re.sub(r"[^a-z0-9 ]", "", query.lower()).strip()
+    t = re.sub(r"[^a-z0-9 ]", "", hit.title.lower()).strip()
+    if t == q:
+        return 100
+    if t.startswith(q) or q.startswith(t):
+        return 70
+    qw, tw = set(q.split()), set(t.split())
+    if qw and qw <= tw:
+        return 50
+    if qw & tw:
+        return 20 + 10 * len(qw & tw) // max(1, len(qw))
+    return 0
+
+
 def fetch_tagset(
     target: str,
     token: str | None,
@@ -122,9 +222,15 @@ def fetch_tagset(
                     raw = resp.read().decode("utf-8", "replace")
             except urllib.error.HTTPError as exc:
                 body = exc.read().decode("utf-8", "replace") if exc.fp else ""
-                attempts.append(f"{header or 'no auth'} -> HTTP {exc.code}")
+                attempts.append(f"{fmt.split()[0] if fmt else 'no auth'} -> HTTP {exc.code}")
+
                 if exc.code in (401, 403):
-                    # Bad or expired credentials: stop rather than hammering the account.
+                    low = body.lower()
+                    wrong_scheme = any(m in low for m in _NOT_PROVIDED_MARKERS)
+                    if wrong_scheme and header:
+                        # The header form was not recognised; try the next scheme rather
+                        # than reporting a working token as expired.
+                        continue
                     raise FetchError(
                         f"VidAngel rejected the token (HTTP {exc.code}). It may have "
                         f"expired — grab a fresh one from your browser session.",

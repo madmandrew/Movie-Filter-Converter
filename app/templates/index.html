@@ -99,7 +99,20 @@
       </details>
     </fieldset>
 
-    <fieldset><legend>Fetch by URL</legend>
+    <fieldset><legend>Search VidAngel</legend>
+      <p class="muted">
+        Find out whether VidAngel has filters for a title. Note a
+        <strong>work id is not a tag-set id</strong> — search confirms a title is
+        filterable, then paste its tag-set id or URL below.
+      </p>
+      <div class="toolbar">
+        <input id="vaq" placeholder="title, e.g. 8 Mile" style="flex:1 1 20rem">
+        <button id="vasearch" class="secondary">Search</button>
+      </div>
+      <div id="vares"></div>
+    </fieldset>
+
+    <fieldset><legend>Fetch by URL or id</legend>
       <p class="muted">
         Paste a VidAngel URL — the tag-set endpoint, a watch page, or just the numeric id.
         Requires this server to have outbound internet access.

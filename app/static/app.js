@@ -471,6 +471,41 @@ $('#vaapisave').addEventListener('click', async () => {
   }
 });
 
+$('#vasearch').addEventListener('click', async (e) => {
+  const q = $('#vaq').value.trim();
+  if (!q) return;
+  e.target.disabled = true;
+  $('#vares').innerHTML = '<span class="muted">searching…</span>';
+  try {
+    const r = await api(`/api/vidangel/search?q=${encodeURIComponent(q)}`);
+    if (!r.results.length) {
+      $('#vares').innerHTML = '<span class="muted">no matches</span>';
+      return;
+    }
+    $('#vares').innerHTML = `<table><thead><tr>
+        <th>Title</th><th>Year</th><th>Type</th><th>Tags</th>
+        <th>Filterable</th><th>Work id</th><th></th></tr></thead><tbody>
+      ${r.results.map((x) => `<tr>
+        <td>${esc(x.title)}</td>
+        <td class="num muted">${x.year ?? ''}</td>
+        <td class="muted">${esc(x.kind)}</td>
+        <td class="num">${x.tag_count || ''}</td>
+        <td>${x.filterable
+              ? '<span class="pill ok">yes</span>'
+              : `<span class="pill bad" title="${esc(x.reason)}">no</span>`}</td>
+        <td class="num muted">${x.work_id}</td>
+        <td>${x.cached_tag_set_id
+              ? `<span class="pill ok">cached #${x.cached_tag_set_id}</span>` : ''}</td>
+      </tr>`).join('')}</tbody></table>
+      <p class="muted">Filterable titles need their tag-set id to fetch — open the title
+        on vidangel.com and copy the id from the filters request.</p>`;
+  } catch (err) {
+    $('#vares').innerHTML = `<span class="pill bad">${esc(err.message)}</span>`;
+  } finally {
+    e.target.disabled = false;
+  }
+});
+
 $('#vafetch').addEventListener('click', async (e) => {
   const url = $('#vaurl').value.trim();
   if (!url) return;

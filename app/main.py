@@ -136,10 +136,22 @@ def api_title(path: str):
         "SELECT tag_set_id, work_id, title_hint, runtime FROM tagsets"
     ).fetchall()
     name = (info.get("name") or "").lower()
-    info["tagsets"] = [
-        dict(r) for r in rows
-        if not r["title_hint"] or _looks_like(r["title_hint"], name)
-    ]
+    matches = []
+    for r in rows:
+        if r["title_hint"] and not _looks_like(r["title_hint"], name):
+            continue
+        d = dict(r)
+        # Pre-flight the wrong-master problem: a tag-set keyed to a different cut has
+        # every timing offset, and no amount of per-word precision fixes that. Historical
+        # cases in this library ran +11s and +12s. Surfacing the delta here means the user
+        # sees it before spending GPU time on a run that cannot land correctly.
+        dur = info.get("duration")
+        if dur and r["runtime"]:
+            delta = dur - r["runtime"]
+            d["runtime_delta"] = round(delta, 1)
+            d["same_cut"] = abs(delta) <= 10.0
+        matches.append(d)
+    info["tagsets"] = matches
     return info
 
 
@@ -193,6 +205,40 @@ def api_va_set_auth(body: VidAngelAuthIn):
 def api_va_clear_auth():
     db.set_setting("vidangel_token", None)
     return {"ok": True}
+
+
+@app.get("/api/vidangel/search")
+def api_va_search(q: str):
+    """Search VidAngel by title.
+
+    Returns filterable matches ranked by relevance, plus unfilterable ones flagged so the
+    user knows VidAngel simply does not have that title rather than wondering.
+
+    `work_id` is not a `tag_set_id`: fetching still needs the tag-set id, which no
+    discovered endpoint maps from a work. The search makes finding a title easy and
+    confirms it is filterable; getting its tag-set id is still manual.
+    """
+    token = db.get_setting("vidangel_token")
+    if not token:
+        raise HTTPException(400, "no VidAngel token saved")
+    try:
+        hits = vac.search(q, token)
+    except vac.FetchError as exc:
+        raise HTTPException(502, str(exc))
+
+    hits.sort(key=lambda h: (-vac.relevance(h, q), not h.filterable, h.title))
+    known = {
+        r["work_id"]: r["tag_set_id"] for r in db.connect().execute(
+            "SELECT work_id, tag_set_id FROM tagsets WHERE work_id IS NOT NULL"
+        ).fetchall()
+    }
+    return {"results": [
+        {"work_id": h.work_id, "title": h.title, "year": h.year, "kind": h.kind,
+         "slug": h.slug, "tag_count": h.tag_count, "filterable": h.filterable,
+         "reason": h.reason, "relevance": vac.relevance(h, q),
+         "cached_tag_set_id": known.get(h.work_id)}
+        for h in hits if vac.relevance(h, q) > 0 or not h.filterable
+    ][:25]}
 
 
 class FetchIn(BaseModel):
