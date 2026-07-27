@@ -21,6 +21,16 @@ from dataclasses import dataclass, field
 
 DEFAULT_API = "https://api.vidangel.com/api/bff/tag-sets/{id}/"
 
+#: Django REST Framework's obtain_auth_token, verified present 2026-07-26: posting
+#: {"username", "password"} returns the long-lived `Token <hex>` used everywhere else.
+#: This exists so the token can be obtained without digging through DevTools.
+#:
+#: The password is used for this one request and never stored — only the returned token is
+#: kept. A stored password would be a standing credential for the user's whole VidAngel
+#: account (billing included) in a SQLite file, to save re-running a login that is needed
+#: about once a year.
+LOGIN_API = "https://api.vidangel.com/api/auth/token/"
+
 #: work_id -> tag_set_id. Verified working 2026-07-26.
 #:
 #: The tag-set id lives under `offerings[].tag_set_id`, one offering per streaming service.
@@ -126,6 +136,53 @@ class SearchHit:
     tag_count: int = 0
     filterable: bool = True
     reason: str = ""
+
+
+def login(username: str, password: str, timeout: float = 20.0) -> str:
+    """Exchange VidAngel credentials for an API token.
+
+    Returns the bare token — the caller stores that and discards the password. Raises
+    FetchError with VidAngel's own message on failure, so a wrong password or an account
+    needing 2FA says so rather than looking like a bug here.
+    """
+    body = json.dumps({"username": username, "password": password}).encode()
+    req = urllib.request.Request(LOGIN_API, data=body, method="POST", headers={
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; MovieFilter/1.0)",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        detail = raw
+        try:
+            parsed = json.loads(raw)
+            detail = parsed.get("message") or raw
+            fields = parsed.get("data")
+            if isinstance(fields, dict):
+                detail += " (" + "; ".join(
+                    f"{k}: {v[0] if isinstance(v, list) and v else v}"
+                    for k, v in fields.items()) + ")"
+        except ValueError:
+            pass
+        # Never echo the password back, even indirectly.
+        raise FetchError(f"login failed (HTTP {exc.code}): {detail}"[:400],
+                         status=exc.code) from None
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise FetchError(f"could not reach VidAngel: {exc}") from None
+
+    # DRF returns {"token": ...}; tolerate the other spellings in case this wrapper
+    # differs from the stock serialiser.
+    for key in ("token", "auth_token", "key", "access_token"):
+        value = data.get(key) if isinstance(data, dict) else None
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    raise FetchError(
+        f"login succeeded but no token field was found in the response "
+        f"(keys: {', '.join(list(data)[:8]) if isinstance(data, dict) else type(data).__name__})"
+    )
 
 
 def search(query: str, token: str | None, timeout: float = 20.0) -> list[SearchHit]:

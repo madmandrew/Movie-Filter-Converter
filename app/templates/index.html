@@ -98,10 +98,26 @@
         <code>Authorization</code> header. Paste the whole header or just the token.
       </p>
       <div class="toolbar">
-        <input id="vatoken" type="password" placeholder="Bearer eyJ… (paste here)"
-               style="flex:1 1 26rem" autocomplete="off" spellcheck="false">
-        <button id="vasave">Save token</button>
-        <button id="vaclear" class="secondary">Clear</button>
+        <input id="valogin" placeholder="VidAngel email" style="flex:1 1 14rem"
+               autocomplete="off" spellcheck="false">
+        <input id="vapass" type="password" placeholder="VidAngel password"
+               style="flex:1 1 12rem" autocomplete="new-password">
+        <button id="vadologin">Log in &amp; get token</button>
+      </div>
+      <p class="muted">
+        Your password is sent to VidAngel once to obtain the token and is
+        <strong>never stored</strong> — only the token is kept.
+      </p>
+      <details>
+        <summary class="muted">Or paste a token manually</summary>
+        <div class="toolbar" style="margin-top:.5rem">
+          <input id="vatoken" type="password" placeholder="Token 57e5… (paste here)"
+                 style="flex:1 1 26rem" autocomplete="off" spellcheck="false">
+          <button id="vasave" class="secondary">Save token</button>
+        </div>
+      </details>
+      <div class="toolbar">
+        <button id="vaclear" class="secondary">Clear saved token</button>
         <span id="vastatus" class="muted"></span>
       </div>
       <details>

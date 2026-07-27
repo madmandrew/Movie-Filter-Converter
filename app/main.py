@@ -228,6 +228,31 @@ def api_va_set_auth(body: VidAngelAuthIn):
     return api_va_auth()
 
 
+class VidAngelLoginIn(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/vidangel/login")
+def api_va_login(body: VidAngelLoginIn):
+    """Log in to VidAngel and store the returned token.
+
+    Saves a trip through DevTools. The password is used for this single request and
+    **never stored** — only the token is kept, which is what every other call needs.
+    Storing the password would leave a standing credential for the whole VidAngel
+    account in a SQLite file, to avoid a login needed roughly once a year.
+    """
+    if not body.username.strip() or not body.password:
+        raise HTTPException(400, "username and password are both required")
+    try:
+        token = vac.login(body.username.strip(), body.password)
+    except vac.FetchError as exc:
+        raise HTTPException(502, str(exc))
+
+    db.set_setting("vidangel_token", token)
+    return api_va_auth()
+
+
 @app.delete("/api/vidangel/auth")
 def api_va_clear_auth():
     db.set_setting("vidangel_token", None)

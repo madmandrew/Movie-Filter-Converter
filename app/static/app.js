@@ -1276,6 +1276,30 @@ $('#vasave').addEventListener('click', async () => {
   }
 });
 
+$('#vadologin').addEventListener('click', async (e) => {
+  const username = $('#valogin').value.trim();
+  const password = $('#vapass').value;
+  if (!username || !password) {
+    toast('Enter your VidAngel email and password.', 'warn');
+    return;
+  }
+  e.target.disabled = true;
+  e.target.textContent = 'logging in…';
+  try {
+    await postJSON('/api/vidangel/login', { username, password });
+    // Clear the password from the DOM immediately — it is not needed again, and the
+    // token is now saved server-side.
+    $('#vapass').value = '';
+    toast('Logged in — token saved.', 'ok');
+    await loadTagsets();
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    e.target.disabled = false;
+    e.target.textContent = 'Log in & get token';
+  }
+});
+
 $('#vaclear').addEventListener('click', async () => {
   await api('/api/vidangel/auth', { method: 'DELETE' });
   loadTagsets();
