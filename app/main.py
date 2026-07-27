@@ -241,6 +241,54 @@ def api_va_search(q: str):
     ][:25]}
 
 
+@app.get("/api/vidangel/resolve")
+def api_va_resolve(work_id: int, kind: str = "", q: str = ""):
+    """Resolve a work id to its tag-set ids — the link search alone cannot provide.
+
+    Movies return one entry; shows return every episode. A title can have **several
+    tag-sets**, one per streaming service, because services carry different cuts — The
+    Godfather has two. `runtime` is included so the caller can pick the one matching the
+    local file rather than guessing.
+    """
+    token = db.get_setting("vidangel_token")
+    if not token:
+        raise HTTPException(400, "no VidAngel token saved")
+    try:
+        entries = vac.resolve_tagsets(work_id, token, kind=kind)
+    except vac.FetchError as exc:
+        raise HTTPException(502, str(exc))
+
+    cached = {
+        r["tag_set_id"] for r in db.connect().execute(
+            "SELECT tag_set_id FROM tagsets").fetchall()
+    }
+    out = []
+    for e in entries:
+        out.append({
+            "work_id": e.work_id, "label": e.label, "title": e.title,
+            "season": e.season, "episode": e.episode,
+            "runtime": e.runtime, "tag_count": e.tag_count,
+            "tag_sets": [
+                {"tag_set_id": o.tag_set_id, "service": o.service, "type": o.kind,
+                 "format": o.max_format, "cached": o.tag_set_id in cached}
+                for o in e.offerings
+            ],
+            "tag_set_ids": e.tag_set_ids,
+        })
+    # Narrow a long episode list when the caller passed a filename-ish hint.
+    if q:
+        import re as _re
+
+        m = _re.search(r"s(\d{1,2})\s*e(\d{1,2})", q, _re.I)
+        if m:
+            s_no, e_no = int(m.group(1)), int(m.group(2))
+            narrowed = [x for x in out
+                        if x["season"] == s_no and x["episode"] == e_no]
+            if narrowed:
+                out = narrowed
+    return {"entries": out}
+
+
 class FetchIn(BaseModel):
     url: str
     title_hint: str | None = None

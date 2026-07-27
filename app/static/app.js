@@ -494,17 +494,85 @@ $('#vasearch').addEventListener('click', async (e) => {
               ? '<span class="pill ok">yes</span>'
               : `<span class="pill bad" title="${esc(x.reason)}">no</span>`}</td>
         <td class="num muted">${x.work_id}</td>
-        <td>${x.cached_tag_set_id
-              ? `<span class="pill ok">cached #${x.cached_tag_set_id}</span>` : ''}</td>
+        <td>${x.filterable
+              ? `<button class="secondary varesolve" data-id="${x.work_id}"
+                   data-kind="${esc(x.kind)}" data-title="${esc(x.title)}">Filters…</button>`
+              : ''}</td>
       </tr>`).join('')}</tbody></table>
-      <p class="muted">Filterable titles need their tag-set id to fetch — open the title
-        on vidangel.com and copy the id from the filters request.</p>`;
+      <div id="varesolved"></div>`;
+
+    $$('.varesolve').forEach((b) => b.addEventListener('click', () =>
+      resolveWork(b.dataset.id, b.dataset.kind, b.dataset.title)));
   } catch (err) {
     $('#vares').innerHTML = `<span class="pill bad">${esc(err.message)}</span>`;
   } finally {
     e.target.disabled = false;
   }
 });
+
+async function resolveWork(workId, kind, title) {
+  const box = $('#varesolved');
+  box.innerHTML = '<span class="muted">resolving tag-sets…</span>';
+  try {
+    const r = await api(
+      `/api/vidangel/resolve?work_id=${workId}&kind=${encodeURIComponent(kind)}`);
+    if (!r.entries.length) {
+      box.innerHTML = '<span class="muted">no tag-sets found</span>';
+      return;
+    }
+    const many = r.entries.length > 1;
+    box.innerHTML = `
+      <p class="muted" style="margin-top:.8rem">
+        ${esc(title)} — ${r.entries.length} ${many ? 'episodes' : 'entry'}.
+        A title can have several tag-sets, one per streaming service, because services
+        carry different cuts. Compare <em>runtime</em> against your file and pick the
+        closest.</p>
+      ${many ? `<input id="vafilter" placeholder="filter episodes, e.g. S01E02"
+                 style="margin-bottom:.5rem">` : ''}
+      <table id="vaeps"><thead><tr>
+        <th>Episode</th><th>Runtime</th><th>Tags</th><th>Tag-sets</th>
+      </tr></thead><tbody>
+      ${r.entries.map((e) => `<tr data-label="${esc(e.label.toLowerCase())}">
+        <td>${esc(e.label)}</td>
+        <td class="num muted">${e.runtime ? tc(e.runtime) : '—'}</td>
+        <td class="num">${e.tag_count || ''}</td>
+        <td>${e.tag_sets.map((t) => `
+          <button class="secondary vagrab" data-id="${t.tag_set_id}"
+            data-hint="${esc(e.label)}" title="${esc(t.service)} ${esc(t.type)}">
+            #${t.tag_set_id} ${esc(t.service)}${t.cached ? ' ✓' : ''}</button>`).join(' ')
+          || '<span class="muted">none</span>'}</td>
+      </tr>`).join('')}</tbody></table>`;
+
+    $$('.vagrab').forEach((b) => b.addEventListener('click', async () => {
+      b.disabled = true;
+      const original = b.textContent;
+      b.textContent = 'fetching…';
+      try {
+        const got = await postJSON('/api/vidangel/fetch',
+          { url: String(b.dataset.id), title_hint: b.dataset.hint });
+        b.textContent = `#${got.tag_set_id} ✓ ${got.incidents} tags`;
+        await loadTagsets();
+      } catch (err) {
+        b.textContent = original;
+        b.disabled = false;
+        alert(`Fetch failed: ${err.message}`);
+      }
+    }));
+
+    const filt = $('#vafilter');
+    if (filt) {
+      filt.addEventListener('input', () => {
+        const needle = filt.value.trim().toLowerCase();
+        $$('#vaeps tbody tr').forEach((row) => {
+          row.classList.toggle('hidden',
+            Boolean(needle) && !row.dataset.label.includes(needle));
+        });
+      });
+    }
+  } catch (err) {
+    box.innerHTML = `<span class="pill bad">${esc(err.message)}</span>`;
+  }
+}
 
 $('#vafetch').addEventListener('click', async (e) => {
   const url = $('#vaurl').value.trim();

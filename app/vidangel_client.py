@@ -17,9 +17,25 @@ import json
 import re
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 DEFAULT_API = "https://api.vidangel.com/api/bff/tag-sets/{id}/"
+
+#: work_id -> tag_set_id. Verified working 2026-07-26.
+#:
+#: The tag-set id lives under `offerings[].tag_set_id`, one offering per streaming service.
+#: Different services can carry different cuts of the same title, hence different tag-sets;
+#: each offering also names its service so the user can pick the one matching their copy.
+#:
+#: Movies and episodes use different endpoints, and the wrong one errors rather than
+#: returning empty: `/episodes/?show_id=<movie id>` answers HTTP 500.
+MOVIE_API = "https://api.vidangel.com/api/content/v2/movies/{id}/"
+#: Whole-show listing: `seasons[].episodes[]`, every season and episode in one response.
+SHOW_API = "https://api.vidangel.com/api/content/v2/shows/{id}/"
+#: Single "up next" episode. `next_only=true` is REQUIRED — any other query parameter
+#: (season_number, limit, page…) makes this endpoint answer HTTP 500, and omitting it
+#: entirely 500s too. Kept only as a fallback; SHOW_API returns everything.
+EPISODES_API = "https://api.vidangel.com/api/content/v2/episodes/?show_id={id}&next_only=true"
 
 #: Title search. Verified working 2026-07-26. Returns three branches:
 #:   "titles"               - filterable results, best matches first. Each carries
@@ -182,6 +198,149 @@ def relevance(hit: SearchHit, query: str) -> int:
     if qw & tw:
         return 20 + 10 * len(qw & tw) // max(1, len(qw))
     return 0
+
+
+@dataclass
+class Offering:
+    """One streaming service's copy of a title, with its own tag-set."""
+    tag_set_id: int
+    service: str
+    kind: str = ""              # SUBSCRIPTION | RENTAL | PURCHASE
+    max_format: str = ""
+
+
+@dataclass
+class WorkEntry:
+    """A movie, or one episode of a show, with the tag-sets available for it."""
+    work_id: int
+    title: str
+    kind: str
+    runtime: float | None = None
+    tag_count: int = 0
+    season: int | None = None
+    episode: int | None = None
+    offerings: list[Offering] = field(default_factory=list)
+
+    @property
+    def tag_set_ids(self) -> list[int]:
+        seen, out = set(), []
+        for o in self.offerings:
+            if o.tag_set_id and o.tag_set_id not in seen:
+                seen.add(o.tag_set_id)
+                out.append(o.tag_set_id)
+        return out
+
+    @property
+    def label(self) -> str:
+        if self.season is not None and self.episode is not None:
+            return f"S{self.season:02d}E{self.episode:02d} {self.title}"
+        return self.title
+
+
+def _http_json(url: str, token: str | None, timeout: float = 25.0):
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (compatible; MovieFilter/1.0)",
+    })
+    if token:
+        req.add_header("Authorization", f"Token {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace") if exc.fp else ""
+        raise FetchError(f"HTTP {exc.code} from {url}", status=exc.code,
+                         body=_redact(body, token)) from None
+    except (urllib.error.URLError, TimeoutError, ValueError) as exc:
+        raise FetchError(f"request failed: {_redact(str(exc), token)}") from None
+
+
+def _parse_work(raw: dict) -> WorkEntry:
+    offerings = []
+    for o in raw.get("offerings") or []:
+        if not isinstance(o, dict):
+            continue
+        tsid = o.get("tag_set_id")
+        if not tsid:
+            continue
+        offerings.append(Offering(
+            tag_set_id=int(tsid),
+            service=str(o.get("catalog_id") or o.get("service_id") or "?"),
+            kind=str(o.get("type") or ""),
+            max_format=str(o.get("max_format") or ""),
+        ))
+    rt = raw.get("runtime")
+    return WorkEntry(
+        work_id=int(raw.get("id") or 0),
+        title=str(raw.get("title") or ""),
+        kind=str(raw.get("type") or ""),
+        runtime=float(rt) if rt else None,
+        tag_count=int(raw.get("tag_count") or 0),
+        season=raw.get("season_number"),
+        episode=raw.get("episode_number"),
+        offerings=offerings,
+    )
+
+
+def resolve_tagsets(
+    work_id: int,
+    token: str | None,
+    kind: str = "",
+    next_only: bool = False,
+) -> list[WorkEntry]:
+    """Find the tag-set ids for a work id — the link search alone cannot provide.
+
+    Movies resolve to a single entry; shows resolve to one entry per episode. `kind`
+    ("movie"/"show") comes from the search result and avoids a wasted request, but both
+    endpoints are tried when it is unknown.
+    """
+    attempts: list[str] = []
+    order = (["movie", "show"] if kind.lower().startswith("mov")
+             else ["show", "movie"] if kind else ["movie", "show"])
+
+    for which in order:
+        try:
+            if which == "movie":
+                raw = _http_json(MOVIE_API.format(id=work_id), token)
+                entry = _parse_work(raw if isinstance(raw, dict) else {})
+                if entry.offerings or entry.title:
+                    return [entry]
+                attempts.append("movie endpoint returned no offerings")
+            else:
+                if next_only:
+                    raw = _http_json(EPISODES_API.format(id=work_id), token)
+                    rows = raw if isinstance(raw, list) else (raw.get("results") or [])
+                    entries = [_parse_work(r) for r in rows if isinstance(r, dict)]
+                    if entries:
+                        return entries
+                    attempts.append("next_only returned nothing")
+                    continue
+
+                # Whole show: seasons[].episodes[], each episode carrying its own
+                # `offerings` with tag-set ids. One request covers every season, so a
+                # 110-episode show resolves in a single call.
+                raw = _http_json(SHOW_API.format(id=work_id), token)
+                entries = []
+                for season in (raw.get("seasons") or []):
+                    if not isinstance(season, dict):
+                        continue
+                    for ep in (season.get("episodes") or []):
+                        if not isinstance(ep, dict):
+                            continue
+                        e = _parse_work(ep)
+                        e.season = season.get("number")
+                        e.episode = ep.get("episode_number", len(entries) + 1)
+                        entries.append(e)
+                if entries:
+                    return entries
+                attempts.append("show endpoint listed no episodes")
+        except FetchError as exc:
+            # The wrong endpoint for a type answers 500, not 404, so keep going.
+            attempts.append(f"{which}: {exc}")
+
+    raise FetchError(
+        f"could not resolve tag-sets for work {work_id} — {'; '.join(attempts)}"
+    )
 
 
 def fetch_tagset(
