@@ -202,6 +202,20 @@ pre.log {
 .toast.ok   { border-left-color: var(--ok); }
 .toast.warn { border-left-color: var(--warn); }
 .toast .msg { flex: 1; word-break: break-word; }
+/* Errors stay until dismissed while everything else fades. Without a visible cue
+   there is nothing to distinguish a toast that is waiting on you from one that is
+   about to disappear on its own. */
+.toast.err .msg::before {
+  content: "Error";
+  display: block;
+  color: var(--bad);
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  margin-bottom: .15rem;
+}
+.toast.err button { color: var(--bad); }
 .toast button {
   background: none;
   color: var(--muted);
