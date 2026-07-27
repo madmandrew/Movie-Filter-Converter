@@ -1,16 +1,18 @@
 # Status / handoff
 
-Last updated **2026-07-25**. Read this first when picking the project back up.
-See also `CLAUDE.md` (the legacy 2022 app) and `DESIGN.md` (the intended future build).
+Last updated **2026-07-27**. Read this first when picking the project back up.
+See also `CLAUDE.md` (working in the code) and `DESIGN.md` (the intended future build).
 
 ---
 
 ## Where things stand
 
-The **audio word-muting pipeline works end to end and is verified.** The old 2022 React
-app in `src/` is untouched and is not part of this work — it is legacy reference only.
+The **audio word-muting pipeline works end to end and is verified.** The web app wraps it
+with a library browser, a run queue, and interactive review.
 
-Nothing has been committed. `git status` is dirty with all the new work.
+The 2022 React app that lived in `src/` was **deleted on 2026-07-27** — it was never part
+of this pipeline. Recover it from git history if its output formats are ever needed:
+`git show <commit-before-deletion>:src/components/FilterUtils.ts`.
 
 ### Verified result (Community S01E02, tag-set 46025)
 

@@ -1,114 +1,108 @@
 # CLAUDE.md
 
-> **Read `STATUS.md` first.** As of 2026-07-25 the project has pivoted: a working
-> Whisper-based audio pipeline lives in `tools/` and supersedes the app described
-> below. `STATUS.md` is the handoff; `DESIGN.md` is the intended future build. This
-> file documents the **legacy 2022 React app** in `src/`, kept as reference for its
-> output formats and domain knowledge.
+> Read `README.md` for what the app does and how to run it, `STATUS.md` for where the work
+> stands, and `DESIGN.md` for the intended shape of the build. This file is the map for
+> working *in* the code.
 
-## What this project is (legacy app)
+## What this project is
 
-A single-page React app that converts **ClearPlay / VidAngel-style filter data** (pasted in as raw JSON) into
-skip-list formats the user can apply to their own video files for a **Plex** server:
+A FastAPI web app that mutes profanity and cuts flagged scenes from the user's own media
+files, for a Plex library on Unraid. Deployed as a Docker container with GPU passthrough.
 
-- **VideoSkip** format (`.vsk`-style: `HH:MM:SS.mmm --> HH:MM:SS.mmm` + a category line)
-- **EDL** format (`start end action` in seconds — Plex/MPlayer style)
-
-The workflow it was built for: paste two JSON blobs scraped from a filtering service, tick which
-incidents to keep, set a sync offset, hit Convert, copy the output text out of a textarea, then
-**manually** use those timestamps to mute/cut audio/video from local media files.
-
-History: two commits, both **2022-08-18**. Untouched since. Written by the user as a personal
-one-off tool. The user has said they want to **update or fully re-write it**.
+The 2022 Create React App that used to live in `src/` was **deleted on 2026-07-27**. It
+converted pasted filter JSON into VideoSkip/EDL text and was never part of this pipeline.
+Its output formats live on in `tools/render.py` and the VideoSkip client. To read it:
+`git show HEAD~1:src/components/FilterUtils.ts`.
 
 ## Repo layout
 
 ```
-src/
-  index.tsx                        CRA entry
-  App.tsx                          renders <FilterConverter/> inside a full-viewport header
-  components/
-    FilterConverter.tsx            the entire UI (only real screen)
-    FilterIncident.tsx             one checkbox + context text row
-    FilterTypes.ts                 input JSON interfaces + category enums/map
-    FilterUtils.ts                 all conversion logic (the valuable part)
-    *.scss
-public/                            stock CRA template assets
+app/                 FastAPI web app
+  main.py            HTTP API + page serving; RunIn is the run-options contract
+  jobs.py            single-threaded run queue; _execute() is the whole pipeline
+  db.py              SQLite schema and helpers
+  library.py         media-root browsing, path containment
+  autofetch.py       tag-set lookup by title
+  vidangel_client.py VidAngel API (auth is `Token`, not Bearer)
+  videoskip_client.py
+  titleparse.py      release-filename -> title/year/season/episode
+  static/app.js      the entire front end, one file, no framework
+  templates/index.html
+tools/               the filtering pipeline, importable and CLI-runnable
+tests/               pytest; NOT installed in .venv, so they do not run locally as-is
+testdata/            sample tag-sets
 ```
 
-There is **no** router, no state manager, no backend, no persistence, no CI.
+No router, no bundler, no build step for the front end — `app.js` is served as-is with an
+mtime cache-buster.
 
-## Data model (what the app expects to be pasted in)
+## The pipeline (`tools/`)
 
-Two separate JSON documents, pasted into two separate textareas:
+| file | role |
+|---|---|
+| `align.py` | ffmpeg/ffprobe wrappers, audio extraction, Whisper word timestamps, CUDA DLL registration |
+| `locate.py` | bucket -> exact word boundaries: matching, energy edge refinement, frame snapping |
+| `verify.py` | under/over-mute checks, `tighten()` loop, mute rendering |
+| `scan.py` | full-track discovery scan, dedup, cross-reference against planned mutes |
+| `offset.py` | measures the source-to-file offset from the audio |
+| `scenes.py` | shot-boundary detection, outward snapping of video ranges |
+| `nudity.py` | NudeNet discovery scan + `verify_absent`; classes to act on vs benign |
+| `cut.py` | standalone: excise nudity ranges and concat the remainder (CLI only) |
+| `blur.py` | standalone: pixelate/blur detected regions (CLI only, not wired into the app) |
+| `splice.py` | byte-exact audio splicing for the `splice` quality mode |
+| `render.py` | produces the filtered file; `render()` takes mutes + video_cuts |
+| `vidangel.py` | tag-set parsing, ref_id dedup, category allowlist |
+| `run_filter.py`, `run_cut.py`, `run_blur.py` | CLI drivers |
 
-1. **"Filter SettingUI"** → `FilterSettings`
-   - `asset: { name, duration }`
-   - `filterSettingsUI.category[]` → `Category { id, desc, subcategory[] }`
-   - `subcategory[].incident[]` → `Incident { id, context, desc }`
-   - `category.desc` must match the `ClearplayCategories` enum values verbatim
-     (`'Sex/Nudity' | 'Violence' | 'Language' | 'Substance Abuse'`).
-2. **"Filter"** → `Filter`
-   - `eventList[] : { id, interrupt, resume }` — `interrupt`/`resume` are **seconds**.
+`cut.py` / `blur.py` duplicate some of what the app path does through
+`nudity.py -> video_ranges -> render.py`. They are kept because they run standalone
+without the DB, but **the app does not import them** — changing them does not change app
+behaviour.
 
-The join is `Incident.id === eventList[].id`. Doc 1 supplies the human-readable taxonomy and
-description; doc 2 supplies the actual timestamps.
+## Things that are load-bearing and easy to break
 
-## Conversion logic (`FilterUtils.ts`)
+1. **VidAngel timings are 6-second buckets.** Every `start_approx` is a multiple of 6 and
+   the real word sits −0.7 s to +3.0 s away. Nothing may trust them as timestamps; they
+   are search hints only.
+2. **Verification is by audio energy, not transcript diffing.** Whisper hallucinates on
+   silence and its decode varies run to run, so "the word is gone from the transcript" is
+   not evidence. See `verify.py`.
+3. **Cutting invalidates every later timestamp.** Ranges are resolved against the *source*
+   timeline and applied in one pass. Mapping an output time back to source means walking
+   the cuts in order against a running output position — comparing an output time directly
+   against a source-time cut boundary mixes timelines. (`jobs.py: _to_source`)
+4. **Nudity ranges under-report their extent.** Sampled detection reports a start later
+   than the truth: a hit lands up to one sample interval late, and `min_hits` discards the
+   leading hits. Measured: 2 fps / min_hits=2 reported 15.5 s for content starting at
+   13.5 s. The pad is `(min_hits + 2) / fps`, not a constant.
+5. **The archive is mandatory before any write.** Cuts are destructive and a second pass
+   over an already-filtered file compounds the damage, so a re-run filters *from the
+   archive*, not from the file on disk.
+6. **CUDA DLLs.** `nvidia-cublas-cu12`/`nvidia-cudnn-cu12` install where Windows cannot
+   find them; `align._register_cuda_dlls()` fixes it. A load-only GPU probe is a false
+   positive — the model loads on CUDA and then dies at inference, so `get_model()` runs a
+   real inference to check.
+7. **Category matching is by key, not display string.** Upstream wording changes must not
+   silently drop a category.
 
-- `formatFilterSettings` — flattens `category → subcategory → incident` into
-  `ClearplayFilterGroup[] { category, filters: FilterOption[] }`, drops subcategories with no
-  incidents, dedupes by `incident.id` via lodash `uniqWith`, and defaults every incident to
-  `selected: true`.
-- `convertToTimestamp(seconds)` — `new Date(s * 1000).toISOString().slice(11, 22)` → `HH:MM:SS.mmm`.
-  **Breaks for runtimes ≥ 24h** (irrelevant here) and silently depends on UTC.
-- `convertToVideoSkip` — emits per incident:
-  `HH:MM:SS.mmm --> HH:MM:SS.mmm\n<VideoSkipCategory> 1 (<incident.context>)\n`
-  Category is mapped through `ClearplayToVideoSkipCategoryMap`. The literal `1` is hardcoded.
-- `convertToEDLFormat` — emits `<interrupt+offset> <resume+offset> <type>` where type is
-  `1` for `Language` (EDL mute) and `0` for everything else (EDL cut). Seconds are raw, un-normalized.
-- `offset` is added to both ends of every event, uniformly. There is no per-event nudging.
+## Conventions
 
-## Tech stack / state
-
-- **Create React App 5.0.1** + `react-scripts` — deprecated and unmaintained; this is the single
-  biggest reason a re-write is reasonable.
-- React 18.2, TypeScript 4.7, MUI 5.8/5.10, lodash, `sass`.
-- `react-json-view@1.21.3` — abandoned, throws under React 18 StrictMode in some paths.
-- `App.test.tsx` is the **stock CRA "learn react" test** and will fail — it asserts on a link this
-  app doesn't render. Effectively zero test coverage.
-- No lockfile issues noted, but `npm install` on modern Node will hit CRA peer/OpenSSL problems.
-
-## Known rough edges (all confirmed by reading the code)
-
-1. `JSON.parse` on every keystroke in both textareas, with **no try/catch** — typing or pasting
-   partial JSON throws an uncaught error and blanks the render.
-2. Initial state is `useState<FilterSettings>({} as any)` — `formatFilterSettings` would throw on
-   `undefined.category` if ever called before a valid paste.
-3. `.map()` used purely for side effects / as `.forEach` in both converters (lines 43, 65).
-4. Missing React `key` props on the `<Accordion>` and `<FilterIncident>` lists.
-5. Offset `TextField` → `Number(e.target.value)` yields `NaN` for empty/garbage input, which then
-   poisons every timestamp.
-6. Output textareas are `value=`-bound with no `onChange` → React read-only warning; no copy button,
-   no file download.
-7. Everything lives in one component; conversion is not unit-tested at all.
-8. Category matching is by **display string**, so any upstream wording change silently drops a
-   whole category.
-9. `FilterConverter.scss` has `.json-style` / `.json-text-input` rules that are dead — the component
-   uses an inline `jsonViewerStyle` object instead.
-
-## If re-writing
-
-Preserve the two output formats and the id-join semantics — that's the actual domain knowledge here.
-Worth considering: Vite instead of CRA, real Zod parsing of the pasted JSON with friendly errors,
-file upload + download instead of copy/paste textareas, per-event offset, unit tests around
-`convertToVideoSkip`/`convertToEDLFormat`, and emitting an ffmpeg command or Plex-ready `.edl`
-directly so the "manual" step goes away.
+- ffmpeg/ffprobe are resolved through `align._tool()`, never bare `ffmpeg` — winget's
+  PATH entry is missing in fresh shells and there is a known-location fallback.
+- Long analysis functions take a `progress` callback rather than printing.
+- A classifier's opinion is never auto-applied. Nudity and scan hits are surfaced for
+  review; only the after-the-fact verification is automatic.
+- Front-end helpers (`tc`, `parseTime`, `esc`, `toast`) already exist in `app.js` — reuse
+  them rather than reimplementing.
 
 ## Commands
 
 ```
-npm start     # dev server (CRA, port 3000)
-npm run build
-npm test      # currently fails: stock CRA test
+docker compose up -d                     # deploy (port 8080 -> 8000)
+uvicorn app.main:app --reload            # local dev, needs PYTHONPATH=tools:app
+.venv/Scripts/python.exe tools/run_filter.py <video> <tagset.json> --out out.mkv
+.venv/Scripts/python.exe tools/run_cut.py  <video> <out.mp4>
 ```
+
+`pytest` is **not** installed in `.venv`; `tests/` cannot be run without installing it
+first. Do not claim the suite passes without having actually run it.

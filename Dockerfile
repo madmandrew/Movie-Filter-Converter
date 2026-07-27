@@ -20,6 +20,10 @@ FROM python:3.12-slim
 # matter because video cuts force a re-encode and software x264 is slower than realtime
 # (measured 0.47x at preset slow on 1080p). Hardware encoders are probed at runtime by
 # a real test encode — being listed by ffmpeg does not mean a given driver works.
+#
+# libgomp1 is OpenMP, required by onnxruntime (nudity detection). Note that OpenCV is
+# installed as `opencv-python-headless`: the regular build needs libGL and GTK, which
+# this image does not carry and which nothing here would use.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         libgomp1 \

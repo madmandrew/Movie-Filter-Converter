@@ -14,3 +14,14 @@ python-multipart==0.0.32
 # library search path, which is required on Windows and harmless on Linux.
 nvidia-cublas-cu12==12.9.2.10
 nvidia-cudnn-cu12==9.24.0.43
+
+# Nudity detection. `nudenet` ships its own ONNX weights in the wheel, so no model
+# download is needed at runtime. It pulls onnxruntime and OpenCV, both pinned here
+# because they are imported directly by `tools/nudity.py` and `tools/blur.py`.
+#
+# The *headless* OpenCV build is deliberate: the GUI build depends on system libGL/GTK
+# that the slim base image does not carry, and nothing here ever opens a window.
+# onnxruntime is the CPU build — detection runs on CPU even when Whisper has the GPU.
+nudenet==3.4.2
+onnxruntime==1.28.0
+opencv-python-headless==5.0.0.93

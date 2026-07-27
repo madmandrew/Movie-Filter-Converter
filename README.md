@@ -100,4 +100,4 @@ The command-line pipeline works standalone too:
 - `STATUS.md` — current state, verified results, and hard-won lessons worth not
   relearning.
 - `DESIGN.md` — measurements behind the design decisions.
-- `CLAUDE.md` — the original 2022 React app, kept for reference.
+- `CLAUDE.md` — repo map and the constraints that are easy to break when changing code.
