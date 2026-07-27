@@ -89,6 +89,19 @@ CREATE TABLE IF NOT EXISTS skipfiles (
     added_at    TEXT
 );
 
+-- Auto-fetch results per title. Caches the negative answers too ("VidAngel has no
+-- filters for this") so a library sweep does not re-query thousands of titles every run.
+CREATE TABLE IF NOT EXISTS autofetch (
+    path        TEXT PRIMARY KEY,
+    status      TEXT NOT NULL,      -- fetched|suggested|none|unfilterable|error
+    work_id     INTEGER,
+    tag_set_id  INTEGER,
+    score       INTEGER,
+    detail      TEXT,
+    checked_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_autofetch_status ON autofetch(status);
+
 CREATE TABLE IF NOT EXISTS tagsets (
     tag_set_id  INTEGER PRIMARY KEY,
     work_id     INTEGER,

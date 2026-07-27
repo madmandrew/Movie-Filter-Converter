@@ -207,6 +207,99 @@ def api_va_clear_auth():
     return {"ok": True}
 
 
+class AutoFetchIn(BaseModel):
+    path: str | None = None          # one title; omit to sweep
+    library: str | None = None       # limit a sweep to one library
+    limit: int = 200
+    auto: bool = True                # False = suggest only, never fetch
+    force: bool = False              # ignore cached answers
+    only_missing: bool = True        # skip titles that already have a tag-set
+
+
+@app.post("/api/vidangel/autofetch")
+def api_autofetch(body: AutoFetchIn):
+    """Find and cache VidAngel filters automatically.
+
+    One title runs inline; a sweep runs in the background, since matching thousands of
+    files means thousands of throttled API calls.
+    """
+    import autofetch as af
+
+    if not db.get_setting("vidangel_token"):
+        raise HTTPException(400, "no VidAngel token saved")
+
+    if body.path:
+        row = db.connect().execute(
+            "SELECT name, duration FROM titles WHERE path=?", (body.path,)).fetchone()
+        if not row:
+            raise HTTPException(404, "unknown title")
+        res = af.match_one(body.path, row["name"], row["duration"],
+                           auto=body.auto, force=body.force)
+        return {
+            "status": res.status, "detail": res.detail, "score": res.score,
+            "work_id": res.work_id, "tag_set_id": res.tag_set_id,
+            "parsed": res.parsed, "candidates": res.candidates,
+        }
+
+    sql = ["SELECT path, name, duration FROM titles WHERE 1=1"]
+    args: list = []
+    if body.library:
+        sql.append("AND library=?")
+        args.append(body.library)
+    if body.only_missing:
+        sql.append("AND tag_set_id IS NULL")
+    sql.append("ORDER BY library, name LIMIT ?")
+    args.append(body.limit)
+    rows = db.connect().execute(" ".join(sql), args).fetchall()
+    targets = [(r["path"], r["name"], r["duration"]) for r in rows]
+    if not targets:
+        return {"queued": 0, "detail": "nothing to match"}
+
+    _autofetch_state.update(total=len(targets), done=0, running=True,
+                            counts={}, last="")
+
+    def _worker():
+        def progress(i, n, res):
+            _autofetch_state["done"] = i
+            _autofetch_state["last"] = f"{res.status}: {res.parsed}"
+            _autofetch_state["counts"][res.status] = (
+                _autofetch_state["counts"].get(res.status, 0) + 1)
+
+        try:
+            af.sweep(targets, auto=body.auto, progress=progress)
+        finally:
+            _autofetch_state["running"] = False
+
+    import threading
+
+    threading.Thread(target=_worker, daemon=True, name="autofetch").start()
+    return {"queued": len(targets)}
+
+
+_autofetch_state: dict = {"running": False, "total": 0, "done": 0,
+                          "counts": {}, "last": ""}
+
+
+@app.get("/api/vidangel/autofetch")
+def api_autofetch_status():
+    rows = db.connect().execute(
+        "SELECT status, COUNT(*) n FROM autofetch GROUP BY status").fetchall()
+    return {**_autofetch_state,
+            "totals": {r["status"]: r["n"] for r in rows}}
+
+
+@app.get("/api/vidangel/suggestions")
+def api_suggestions(limit: int = 100):
+    """Titles whose best match scored too low to fetch automatically."""
+    rows = db.connect().execute(
+        """SELECT a.path, a.status, a.detail, a.score, a.work_id, t.name
+           FROM autofetch a JOIN titles t ON t.path = a.path
+           WHERE a.status IN ('suggested','none','error')
+           ORDER BY a.score DESC LIMIT ?""", (limit,)
+    ).fetchall()
+    return {"suggestions": [dict(r) for r in rows]}
+
+
 @app.get("/api/vidangel/search")
 def api_va_search(q: str):
     """Search VidAngel by title.

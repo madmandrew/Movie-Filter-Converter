@@ -65,13 +65,41 @@ async function loadLibrary() {
       <td class="num">${t.size_gb} GB</td>
       <td>${audio}</td>
       <td><span class="pill ${cls}">${esc(t.status)}</span></td>
-      <td>${t.has_tagset ? '<span class="pill ok">yes</span>' : '<span class="muted">—</span>'}</td>
+      <td>${vidangelCell(t)}</td>
       <td><button data-path="${esc(t.path)}" class="filterbtn secondary">Filter…</button></td>
     </tr>`;
   }).join('') || '<tr><td colspan="7" class="muted">No titles. Try “Rescan library”.</td></tr>';
 
   $$('.filterbtn').forEach((b) =>
     b.addEventListener('click', () => openFilter(b.dataset.path)));
+  $$('.afone').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    b.textContent = '…';
+    try {
+      const r = await postJSON('/api/vidangel/autofetch',
+        { path: b.dataset.path, force: true });
+      await loadLibrary();
+      if (r.status !== 'fetched') alert(`${r.status}: ${r.detail}`);
+    } catch (e) {
+      alert(e.message);
+      b.disabled = false;
+      b.textContent = 'Find';
+    }
+  }));
+}
+
+/** VidAngel column: a cached tag-set, a known-negative answer, or a lookup button. */
+function vidangelCell(t) {
+  if (t.has_tagset) return '<span class="pill ok">yes</span>';
+  const s = t.autofetch_status;
+  if (s === 'unfilterable') {
+    return `<span class="pill bad" title="${esc(t.autofetch_detail || '')}">none</span>`;
+  }
+  if (s === 'none') return '<span class="pill muted">no match</span>';
+  if (s === 'suggested') {
+    return `<span class="pill warn" title="${esc(t.autofetch_detail || '')}">check</span>`;
+  }
+  return `<button class="secondary afone" data-path="${esc(t.path)}">Find</button>`;
 }
 
 $('#q').addEventListener('input', () => {
@@ -80,6 +108,59 @@ $('#q').addEventListener('input', () => {
 });
 $('#lib').addEventListener('change', loadLibrary);
 $('#status').addEventListener('change', loadLibrary);
+/* ------------------------------------------------- auto-fetch VidAngel filters */
+let afPoll;
+
+async function pollAutofetch() {
+  const st = await api('/api/vidangel/autofetch');
+  const box = $('#afprogress');
+  if (!st.running && !st.total) { box.classList.add('hidden'); return; }
+
+  box.classList.remove('hidden');
+  const pct = st.total ? Math.round((st.done / st.total) * 100) : 0;
+  const counts = Object.entries(st.counts || {})
+    .map(([k, v]) => `${v} ${k}`).join(' · ') || '—';
+  box.innerHTML = `
+    <div class="toolbar">
+      <div class="bar" style="width:220px"><i style="width:${pct}%"></i></div>
+      <span class="muted">${st.done}/${st.total} — ${esc(counts)}</span>
+      <span class="muted">${esc(st.last || '')}</span>
+    </div>`;
+
+  if (!st.running) {
+    clearInterval(afPoll);
+    afPoll = null;
+    await loadLibrary();
+    box.innerHTML = `<p class="muted">Finished — ${esc(counts)}.
+      “check” means a match was found but scored too low to trust; open the title to
+      confirm. “none” means VidAngel has no filters for it.</p>`;
+  }
+}
+
+$('#autofetch').addEventListener('click', async (e) => {
+  const lib = $('#lib').value;
+  const scope = lib ? `the ${lib} library` : 'all libraries';
+  if (!confirm(`Search VidAngel for filters across ${scope}?\n\n`
+    + 'Only close matches are fetched automatically; anything uncertain is listed for '
+    + 'you to confirm. Requests are throttled, so a large library takes a while.')) return;
+  e.target.disabled = true;
+  try {
+    const r = await postJSON('/api/vidangel/autofetch',
+      { library: lib || null, limit: 500, only_missing: true });
+    if (!r.queued) {
+      alert(r.detail || 'nothing to match');
+      return;
+    }
+    if (afPoll) clearInterval(afPoll);
+    afPoll = setInterval(pollAutofetch, 1500);
+    pollAutofetch();
+  } catch (err) {
+    alert(`Could not start: ${err.message}`);
+  } finally {
+    e.target.disabled = false;
+  }
+});
+
 $('#rescan').addEventListener('click', async (e) => {
   e.target.disabled = true;
   e.target.textContent = 'Scanning…';

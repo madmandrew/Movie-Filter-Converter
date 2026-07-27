@@ -281,18 +281,25 @@ def ensure_probed(path: str, force: bool = False) -> dict:
 def search(q: str = "", library: str | None = None, status: str | None = None,
            limit: int = 200, offset: int = 0) -> list[dict]:
     """Title search. Matches on name fragments, case-insensitively."""
-    sql = ["SELECT * FROM titles WHERE 1=1"]
+    # Left-join the auto-fetch cache so the library view can show "no filters exist"
+    # as a settled answer rather than an un-tried lookup.
+    sql = ["""SELECT t.*, a.status AS autofetch_status, a.detail AS autofetch_detail,
+                     a.score AS autofetch_score
+              FROM titles t LEFT JOIN autofetch a ON a.path = t.path
+              WHERE 1=1"""]
     args: list = []
+    # Columns must be table-qualified: `status`, `name` and `library` all exist on both
+    # `titles` and `autofetch`, and an unqualified reference is ambiguous.
     for term in (t for t in q.split() if t):
-        sql.append("AND name LIKE ?")
+        sql.append("AND t.name LIKE ?")
         args.append(f"%{term}%")
     if library:
-        sql.append("AND library=?")
+        sql.append("AND t.library=?")
         args.append(library)
     if status:
-        sql.append("AND status=?")
+        sql.append("AND t.status=?")
         args.append(status)
-    sql.append("ORDER BY library, name LIMIT ? OFFSET ?")
+    sql.append("ORDER BY t.library, t.name LIMIT ? OFFSET ?")
     args += [limit, offset]
 
     rows = connect().execute(" ".join(sql), args).fetchall()
