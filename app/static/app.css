@@ -252,6 +252,14 @@ pre.log {
 }
 #dialog input { width: 100%; margin-top: .75rem; }
 
+/* --- live run monitor --- */
+.liverun { margin-bottom: 1rem; }
+.liverun legend { color: var(--text); text-transform: none; letter-spacing: 0;
+                  font-size: .9rem; }
+.liverun .toolbar { margin-bottom: 0; }
+/* Taller than the modal log: this one is meant to be watched, not glanced at. */
+pre.livelog { max-height: 380px; margin-top: .6rem; }
+
 /* --- per-incident tag-set selection --- */
 .catgroup { border-bottom: 1px solid var(--line); padding: .15rem 0; }
 .catgroup:last-child { border-bottom: 0; }

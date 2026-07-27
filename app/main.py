@@ -31,6 +31,11 @@ import vidangel_client as vac  # noqa: E402
 async def lifespan(_app: FastAPI):
     """Create the schema and start the job worker before serving any request."""
     db.init()
+    # Clear runs left mid-flight by a previous process before starting the worker,
+    # otherwise they show as active forever and nothing ever picks them up.
+    orphans = jobs.reap_orphans()
+    if orphans:
+        print(f"[startup] marked {orphans} interrupted run(s) as failed", flush=True)
     jobs.ensure_worker()
     yield
 
@@ -928,6 +933,93 @@ def api_title_history(path: str):
         "runs": out_runs,
         "decisions": [dict(d) for d in decisions],
     }
+
+
+#: A running job with no heartbeat for this long is probably wedged. Chosen well above
+#: the slowest normal gap: a full-episode Whisper scan and an x264 render both emit
+#: nothing for minutes at a time, so anything tighter cries wolf.
+STALL_SECONDS = 900
+
+
+@app.get("/api/runs/live")
+def api_runs_live(tail: int = 60):
+    """Everything needed to watch active runs: stage, progress, log tail, staleness.
+
+    `seconds_since_heartbeat` is the part that distinguishes stuck from slow — stage and
+    percentage alone look identical either way.
+    """
+    from datetime import datetime, timezone
+
+    rows = db.connect().execute(
+        """SELECT id, path, status, stage, progress, log, error,
+                  created_at, started_at, finished_at, heartbeat_at
+           FROM runs
+           WHERE status IN ('queued','running')
+              OR finished_at >= datetime('now','-30 minutes')
+           ORDER BY id DESC"""
+    ).fetchall()
+
+    now = datetime.now(timezone.utc)
+
+    def age(ts: str | None) -> float | None:
+        if not ts:
+            return None
+        try:
+            parsed = datetime.fromisoformat(ts)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return round((now - parsed).total_seconds(), 1)
+
+    out = []
+    for r in rows:
+        lines = (r["log"] or "").strip().splitlines()
+        # Fall back through heartbeat -> started -> created. A run predating the heartbeat
+        # column has none, and treating that as "not stale" reported a long-dead job as
+        # healthy — the exact failure this endpoint exists to catch.
+        since = age(r["heartbeat_at"]) or age(r["started_at"]) or age(r["created_at"])
+        out.append({
+            "id": r["id"],
+            "name": os.path.basename(r["path"]),
+            "path": r["path"],
+            "status": r["status"],
+            "stage": r["stage"],
+            "progress": r["progress"] or 0,
+            "created_at": r["created_at"],
+            "started_at": r["started_at"],
+            "finished_at": r["finished_at"],
+            "elapsed": age(r["started_at"]) if r["status"] == "running" else None,
+            "seconds_since_heartbeat": since,
+            "stalled": bool(r["status"] == "running" and since
+                            and since > STALL_SECONDS),
+            "log_tail": lines[-tail:],
+            "log_lines": len(lines),
+            "error": (r["error"] or "").strip().splitlines()[-1:] or None,
+        })
+
+    return {
+        "runs": out,
+        "worker_alive": jobs.worker_alive(),
+        "current": jobs.current(),
+        "queued": sum(1 for r in out if r["status"] == "queued"),
+        "running": sum(1 for r in out if r["status"] == "running"),
+        "stall_seconds": STALL_SECONDS,
+    }
+
+
+@app.get("/api/runs/{run_id}/log")
+def api_run_log(run_id: int, offset: int = 0):
+    """Incremental log fetch, so polling sends only new lines rather than the whole log."""
+    row = db.connect().execute(
+        "SELECT log, status, stage, progress, heartbeat_at FROM runs WHERE id=?",
+        (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown run")
+    lines = (row["log"] or "").splitlines()
+    return {"lines": lines[offset:], "total": len(lines),
+            "status": row["status"], "stage": row["stage"],
+            "progress": row["progress"] or 0}
 
 
 @app.get("/api/runs")

@@ -46,7 +46,10 @@ CREATE TABLE IF NOT EXISTS runs (
     error        TEXT,
     created_at   TEXT NOT NULL,
     started_at   TEXT,
-    finished_at  TEXT
+    finished_at  TEXT,
+    -- When the stage/progress last moved. Without this a hung job is indistinguishable
+    -- from a slow one: both show the same stage and percentage indefinitely.
+    heartbeat_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 
@@ -141,9 +144,25 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+#: Columns added after the initial schema. `CREATE TABLE IF NOT EXISTS` is a no-op on an
+#: existing table, so new columns need an explicit ALTER — additive only, never
+#: destructive, so an older database keeps working.
+_MIGRATIONS = (
+    ("runs", "heartbeat_at", "TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, column, coltype in _MIGRATIONS:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 def init() -> None:
     conn = connect()
     conn.executescript(SCHEMA)
+    _migrate(conn)
     if not conn.execute("SELECT 1 FROM wordlist LIMIT 1").fetchone():
         conn.executemany(
             "INSERT INTO wordlist(word, category, enabled) VALUES (?,?,1)",

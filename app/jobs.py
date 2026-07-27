@@ -51,6 +51,30 @@ def enqueue(path: str, options: dict) -> int:
     return run_id
 
 
+def reap_orphans() -> int:
+    """Fail runs left 'running' by a previous process.
+
+    Nothing resumes a job across a restart — the worker is in-process — so a run still
+    marked running at startup is an orphan. Left alone it shows as active forever, which
+    is indistinguishable from a live job and makes the whole idea of "is it stuck?"
+    meaningless.
+    """
+    # Build the message in Python: adjacent string literals concatenate in Python but are
+    # a syntax error inside a SQL statement, and SQLite reports it only at execute time.
+    note = ("Interrupted: the server restarted while this run was in progress. Nothing "
+            "resumes across a restart — use \"Edit & re-run\" to start it again.")
+    with tx() as c:
+        rows = c.execute(
+            "SELECT id FROM runs WHERE status IN ('running','queued')").fetchall()
+        for r in rows:
+            c.execute(
+                "UPDATE runs SET status='failed', finished_at=?, "
+                "error = COALESCE(error,'') || ? WHERE id=?",
+                (_now(), note, r["id"]),
+            )
+    return len(rows)
+
+
 def ensure_worker() -> None:
     global _worker
     if _worker is None or not _worker.is_alive():
@@ -71,14 +95,19 @@ def _loop() -> None:
 
 
 def _log(run_id: int, msg: str) -> None:
+    # Timestamp every line: on a long run the gap between lines is what tells you whether
+    # a stage is working or wedged.
+    stamped = f"[{_now()[11:19]}] {msg}"
     with tx() as c:
-        c.execute("UPDATE runs SET log = log || ? WHERE id=?", (msg + "\n", run_id))
+        c.execute("UPDATE runs SET log = log || ?, heartbeat_at=? WHERE id=?",
+                  (stamped + "\n", _now(), run_id))
 
 
 def _stage(run_id: int, stage: str, pct: float) -> None:
-    _current.update(run_id=run_id, stage=stage, pct=pct)
+    _current.update(run_id=run_id, stage=stage, pct=pct, at=_now())
     with tx() as c:
-        c.execute("UPDATE runs SET stage=?, progress=? WHERE id=?", (stage, pct, run_id))
+        c.execute("UPDATE runs SET stage=?, progress=?, heartbeat_at=? WHERE id=?",
+                  (stage, pct, _now(), run_id))
 
 
 def _fail(run_id: int, err: str) -> None:
@@ -94,6 +123,20 @@ def _fail(run_id: int, err: str) -> None:
 
 def current() -> dict:
     return dict(_current)
+
+
+def worker_alive() -> bool:
+    """Is the job thread running?
+
+    A dead worker and a wedged job look identical from the outside — both leave a run
+    sitting at the same stage forever — but they need different responses, so report
+    them separately.
+    """
+    return bool(_worker and _worker.is_alive())
+
+
+def queue_depth() -> int:
+    return _Q.qsize()
 
 
 def _execute(run_id: int) -> None:
@@ -539,11 +582,26 @@ def _execute(run_id: int) -> None:
                     cuts, duration=duration,
                 ))
 
-        # VideoSkip video entries and approved nudity ranges: both are real ranges (not
-        # 6s buckets), snapped outward to shot boundaries so a cut never lands mid-shot.
-        for extra in (*vsk_ranges, *nudity_ranges):
+        # VideoSkip video entries are real timestamps, so a nominal pad is enough.
+        for extra in vsk_ranges:
             vr.append(snap_range(extra["start"], extra["end"], cuts,
                                  duration=duration, pad=1.0))
+
+        # Nudity ranges under-report their true extent, and by more than the sampling
+        # interval alone. Two effects stack: a hit can land up to one interval late, and
+        # `min_hits` discards the leading hits until the threshold is met. Measured: a
+        # 2 fps scan with min_hits=2 reported 15.5s for content that starts at 13.5s —
+        # 2.0s, which is (min_hits + 2) intervals, not one.
+        #
+        # Padding by that much means a cut opens before the scene rather than inside it.
+        # Snapping still overrides the pad wherever a real shot boundary is closer, so on
+        # normal footage this only matters for mid-shot content.
+        _nfps = max(float(opts.get("nudity_fps", 1.0)), 0.1)
+        _nhits = max(int(opts.get("nudity_min_hits", 2)), 1)
+        nud_pad = max(1.0, (_nhits + 2) / _nfps)
+        for extra in nudity_ranges:
+            vr.append(snap_range(extra["start"], extra["end"], cuts,
+                                 duration=duration, pad=nud_pad))
 
         for m in manual_cuts:
             s, e = float(m["start"]), float(m["end"])

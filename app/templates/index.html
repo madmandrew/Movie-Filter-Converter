@@ -11,6 +11,7 @@
   <h1>Movie Filter</h1>
   <nav>
     <button class="tab active" data-view="library">Library</button>
+    <button class="tab" data-view="live">Live</button>
     <button class="tab" data-view="runs">Runs</button>
     <button class="tab" data-view="words">Word list</button>
     <button class="tab" data-view="tagsets">Tag-sets</button>
@@ -43,6 +44,17 @@
       </tr></thead>
       <tbody></tbody>
     </table>
+  </section>
+
+  <!-- --------------------------------------------------------------- live -->
+  <section id="view-live" class="view hidden">
+    <div class="toolbar">
+      <span id="livestatus" class="muted"></span>
+      <label class="row" style="margin-left:auto">
+        <input type="checkbox" id="liveauto" checked>
+        <span class="muted">auto-refresh</span></label>
+    </div>
+    <div id="livebody"></div>
   </section>
 
   <!-- --------------------------------------------------------------- runs -->

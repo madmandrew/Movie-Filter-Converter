@@ -116,6 +116,7 @@ $$('.tab').forEach((b) => b.addEventListener('click', () => {
   $$('.tab').forEach((x) => x.classList.toggle('active', x === b));
   $$('.view').forEach((v) => v.classList.add('hidden'));
   $(`#view-${b.dataset.view}`).classList.remove('hidden');
+  if (b.dataset.view === 'live') startLive();
   if (b.dataset.view === 'runs') loadRuns();
   if (b.dataset.view === 'words') loadWords();
   if (b.dataset.view === 'settings') loadSettings();
@@ -913,6 +914,112 @@ async function openFilter(path, prefill = null) {
     }
   });
 }
+
+/* ------------------------------------------------------------------- live */
+let livePoll = null;
+//: Which run's log is expanded, and how far its <pre> was scrolled, so a refresh does
+//: not collapse the panel or yank the view away from what is being read.
+const liveOpen = new Set();
+
+const humanAge = (s) => {
+  if (s == null) return '—';
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+};
+
+async function loadLive() {
+  let d;
+  try {
+    d = await api('/api/runs/live');
+  } catch (e) {
+    $('#livestatus').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+    return;
+  }
+
+  const bits = [];
+  bits.push(d.worker_alive
+    ? '<span class="pill ok">worker running</span>'
+    : '<span class="pill bad">worker NOT running</span>');
+  bits.push(`<span class="muted">${d.running} running · ${d.queued} queued</span>`);
+  $('#livestatus').innerHTML = bits.join(' ');
+
+  if (!d.runs.length) {
+    $('#livebody').innerHTML =
+      '<p class="muted">Nothing active. Finished runs stay here for 30 minutes.</p>';
+    return;
+  }
+
+  // Preserve scroll position of any open log before re-rendering.
+  const scrolls = {};
+  $$('.livelog').forEach((el) => {
+    scrolls[el.dataset.id] = {
+      top: el.scrollTop,
+      pinned: el.scrollHeight - el.scrollTop - el.clientHeight < 40,
+    };
+  });
+
+  $('#livebody').innerHTML = d.runs.map((r) => {
+    const pct = Math.round(r.progress);
+    const cls = { done: 'ok', failed: 'bad', running: 'warn' }[r.status] || '';
+    const open = liveOpen.has(String(r.id));
+    // A stalled run is the case this page exists for: same stage, same percentage,
+    // no heartbeat. Say so explicitly rather than leaving it to be inferred.
+    const stall = r.stalled
+      ? `<span class="pill bad" title="No log or stage change for over
+           ${Math.round(d.stall_seconds / 60)} minutes">possibly stuck —
+           quiet ${humanAge(r.seconds_since_heartbeat)}</span>`
+      : (r.status === 'running'
+          ? `<span class="muted">last activity ${humanAge(r.seconds_since_heartbeat)} ago</span>`
+          : '');
+    return `<fieldset class="liverun">
+      <legend>#${r.id} — ${esc(r.name)}</legend>
+      <div class="toolbar">
+        <span class="pill ${cls}">${esc(r.status)}</span>
+        <span>${esc(r.stage || '')}</span>
+        <div class="bar" style="width:160px"><i style="width:${pct}%"></i></div>
+        <span class="muted">${pct}%</span>
+        ${r.elapsed != null
+          ? `<span class="muted">running ${humanAge(r.elapsed)}</span>` : ''}
+        ${stall}
+        <button class="secondary livetoggle" data-id="${r.id}"
+          style="margin-left:auto">${open ? 'Hide log' : 'Show log'}</button>
+      </div>
+      ${r.error ? `<div class="pill bad" style="display:block;white-space:normal;
+        padding:.5rem;margin-top:.5rem">${esc(r.error.join(' '))}</div>` : ''}
+      <pre class="log livelog ${open ? '' : 'hidden'}" data-id="${r.id}"
+        >${esc(r.log_tail.join('\n')) || '(no output yet)'}</pre>
+      ${open && r.log_lines > r.log_tail.length
+        ? `<div class="muted">showing the last ${r.log_tail.length} of
+             ${r.log_lines} lines</div>` : ''}
+    </fieldset>`;
+  }).join('');
+
+  $$('.livetoggle').forEach((b) => b.addEventListener('click', () => {
+    const id = String(b.dataset.id);
+    if (liveOpen.has(id)) liveOpen.delete(id); else liveOpen.add(id);
+    loadLive();
+  }));
+
+  // Restore scroll; if the user was at the bottom, keep them pinned to the newest line.
+  $$('.livelog').forEach((el) => {
+    const s = scrolls[el.dataset.id];
+    if (!s) { el.scrollTop = el.scrollHeight; return; }
+    el.scrollTop = s.pinned ? el.scrollHeight : s.top;
+  });
+}
+
+function startLive() {
+  loadLive();
+  if (livePoll) clearInterval(livePoll);
+  livePoll = setInterval(() => {
+    if ($('#view-live').classList.contains('hidden') || !$('#liveauto').checked) return;
+    loadLive();
+  }, 2000);
+}
+$('#liveauto').addEventListener('change', (e) => {
+  if (e.target.checked) loadLive();
+});
 
 /* ------------------------------------------------------------------- runs */
 async function loadRuns() {
