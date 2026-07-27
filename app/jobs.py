@@ -169,15 +169,43 @@ def _execute(run_id: int) -> None:
                            (opts["tag_set_id"],)).fetchone()
         if row:
             ts = vidangel.parse(row["payload"])
-            warn = ts.check_runtime(duration)
-            if warn:
-                _log(run_id, f"WARNING {warn}")
+            # The runtime comparison is deferred until after the archive swap below: on a
+            # re-run the file on disk may be a filtered copy that is already shorter than
+            # the original, which would report a mismatch that does not exist.
 
     categories = tuple(opts.get("categories") or ())
     words = opts.get("words") or []
 
     # ---- archive ----------------------------------------------------------------
+    #
+    # An existing archive means this title was filtered before, so the file on disk may
+    # already be a filtered copy. Filtering that again compounds the damage — cuts are
+    # destructive and a second pass cannot restore frames the first one removed — so the
+    # archive becomes the source and the previous output is replaced.
     archive = opts.get("archive_path")
+    if archive and os.path.exists(archive):
+        try:
+            same = os.path.samefile(archive, path)
+        except OSError:
+            same = False
+        if not same:
+            _log(run_id, f"re-run: filtering from the archived original instead of "
+                         f"{os.path.basename(path)}")
+            path = archive
+            # Re-probe: the archive is the raw cut, so its duration and frame rate are
+            # the ones every timestamp must be resolved against.
+            fps = probe_fps(path)
+            duration = probe_duration(path)
+            _log(run_id, f"archive: fps={fps:.3f} duration={duration:.1f}s")
+
+    # Now that `path`/`duration` refer to the raw cut, the runtime comparison is
+    # meaningful: it says whether the tag-set matches this master, not whether a previous
+    # run shortened the file.
+    if ts:
+        warn = ts.check_runtime(duration)
+        if warn:
+            _log(run_id, f"WARNING {warn}")
+
     if archive:
         _stage(run_id, "archiving", 5)
         if os.path.exists(archive):
@@ -710,10 +738,33 @@ def _execute(run_id: int) -> None:
         _stage(run_id, "rendering", 85)
         import render as render_mod
 
-        stats = render_mod.render(path, out, mutes, video_ranges,
-                                  quality=opts.get("quality", "splice"))
+        # Render to a temporary name and swap on success. Deleting the previous output up
+        # front would destroy the only filtered copy if this render then failed, leaving
+        # the library with nothing; writing directly to `out` risks a half-written file
+        # under the real name if the process dies mid-encode.
+        tmp_out = f"{out}.partial{os.path.splitext(out)[1]}"
+        for stale in (tmp_out,):
+            if os.path.exists(stale):
+                os.remove(stale)
+
+        try:
+            stats = render_mod.render(path, tmp_out, mutes, video_ranges,
+                                      quality=opts.get("quality", "splice"))
+        except Exception:
+            # Don't leave a partial file behind to be mistaken for output, or to block
+            # the next attempt.
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+            raise
+
+        replaced = os.path.exists(out)
+        if replaced:
+            os.remove(out)
+        os.replace(tmp_out, out)
+
         report["render"] = stats
-        _log(run_id, f"rendered {out}: {stats.get('summary','')}")
+        _log(run_id, f"{'replaced' if replaced else 'rendered'} {out}: "
+                     f"{stats.get('summary','')}")
 
         # Verify the cuts actually removed what they were meant to. Cutting shifts the
         # timeline, so the region to re-check is where each removed range *used to be* —
