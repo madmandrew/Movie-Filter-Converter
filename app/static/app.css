@@ -45,6 +45,7 @@ button {
 }
 button:hover { filter: brightness(1.12); }
 button.secondary { background: var(--panel-2); border: 1px solid var(--line); }
+button.danger { background: var(--bad); }
 button.tab {
   background: transparent;
   color: var(--muted);
@@ -173,6 +174,69 @@ pre.log {
   font-size: 12px;
   white-space: pre-wrap;
 }
+
+/* --- toasts + dialogs (replacing native alert/confirm/prompt) --- */
+#toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: .5rem;
+  z-index: 200;
+  max-width: min(420px, calc(100vw - 2rem));
+}
+.toast {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  padding: .6rem .8rem;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .35);
+  display: flex;
+  gap: .6rem;
+  align-items: flex-start;
+  animation: toast-in .16s ease-out;
+}
+.toast.err  { border-left-color: var(--bad); }
+.toast.ok   { border-left-color: var(--ok); }
+.toast.warn { border-left-color: var(--warn); }
+.toast .msg { flex: 1; word-break: break-word; }
+.toast button {
+  background: none;
+  color: var(--muted);
+  padding: 0 .2rem;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.toast.leaving { animation: toast-out .16s ease-in forwards; }
+@keyframes toast-in  { from { opacity: 0; transform: translateY(6px); } }
+@keyframes toast-out { to   { opacity: 0; transform: translateY(6px); } }
+@media (prefers-reduced-motion: reduce) {
+  .toast, .toast.leaving { animation: none; }
+}
+
+/* Second-level dialog: sits above the main modal so a confirm can be raised from
+   inside it without one closing the other. */
+#dialog {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .55);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  z-index: 150;
+}
+#dialog .modal-box { width: min(520px, 100%); }
+#dialog h3 { margin: 0 0 .5rem; font-size: 1rem; }
+#dialog .dlg-body { color: var(--muted); white-space: pre-wrap; }
+#dialog .dlg-actions {
+  display: flex;
+  gap: .5rem;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+#dialog input { width: 100%; margin-top: .75rem; }
 
 .hit { border-bottom: 1px solid var(--line); padding: .6rem 0; }
 .hit .ctx { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }

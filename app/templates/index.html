@@ -195,6 +195,20 @@
   </div>
 </div>
 
+<!-- Toast stack and second-level dialog, replacing native alert/confirm/prompt. -->
+<div id="toasts"></div>
+<div id="dialog" class="hidden">
+  <div class="modal-box">
+    <h3 id="dlgtitle"></h3>
+    <div class="dlg-body" id="dlgbody"></div>
+    <input id="dlginput" class="hidden" autocomplete="off">
+    <div class="dlg-actions">
+      <button class="secondary" id="dlgcancel">Cancel</button>
+      <button id="dlgok">OK</button>
+    </div>
+  </div>
+</div>
+
 <script src="/static/app.js"></script>
 </body>
 </html>

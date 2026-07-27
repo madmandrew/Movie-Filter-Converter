@@ -20,6 +20,76 @@ const postJSON = (url, body) => api(url, {
   body: JSON.stringify(body),
 });
 
+/* ------------------------------------------------ toasts + styled dialogs */
+
+/** Transient message. Replaces alert(): non-blocking, dismissible, and styled.
+ *  Errors persist until dismissed, since they usually need reading. */
+function toast(message, kind = 'info', ms = null) {
+  const el = document.createElement('div');
+  el.className = `toast ${kind === 'error' ? 'err' : kind}`;
+  el.innerHTML = `<span class="msg">${esc(message)}</span>
+                  <button title="Dismiss">&times;</button>`;
+  const remove = () => {
+    el.classList.add('leaving');
+    setTimeout(() => el.remove(), 180);
+  };
+  $('button', el).addEventListener('click', remove);
+  $('#toasts').appendChild(el);
+  const life = ms ?? (kind === 'error' ? 0 : 4500);
+  if (life) setTimeout(remove, life);
+  return el;
+}
+
+/** Modal confirm/prompt. Resolves to a boolean, or the entered string, or null.
+ *  Lives above the main modal so it can be raised from inside one. */
+function dialog({ title, body = '', okText = 'OK', cancelText = 'Cancel',
+                  input = null, danger = false }) {
+  return new Promise((resolve) => {
+    const box = $('#dialog');
+    const field = $('#dlginput');
+    $('#dlgtitle').textContent = title;
+    $('#dlgbody').textContent = body;
+    $('#dlgok').textContent = okText;
+    $('#dlgcancel').textContent = cancelText;
+    $('#dlgok').className = danger ? 'danger' : '';
+    field.classList.toggle('hidden', input === null);
+    if (input !== null) {
+      field.value = input.value || '';
+      field.placeholder = input.placeholder || '';
+    }
+    box.classList.remove('hidden');
+    if (input !== null) setTimeout(() => field.focus(), 30);
+
+    const done = (value) => {
+      box.classList.add('hidden');
+      $('#dlgok').removeEventListener('click', onOk);
+      $('#dlgcancel').removeEventListener('click', onCancel);
+      document.removeEventListener('keydown', onKey);
+      box.removeEventListener('click', onBackdrop);
+      resolve(value);
+    };
+    const onOk = () => done(input !== null ? field.value.trim() : true);
+    const onCancel = () => done(input !== null ? null : false);
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); onCancel(); }
+      if (e.key === 'Enter' && input !== null) onOk();
+    };
+    const onBackdrop = (e) => { if (e.target === box) onCancel(); };
+
+    $('#dlgok').addEventListener('click', onOk);
+    $('#dlgcancel').addEventListener('click', onCancel);
+    // Capture phase so Escape closes this dialog, not the modal underneath.
+    document.addEventListener('keydown', onKey, true);
+    box.addEventListener('click', onBackdrop);
+  });
+}
+
+const confirmDialog = (title, body, opts = {}) =>
+  dialog({ title, body, okText: opts.okText || 'Continue', ...opts });
+
+const promptDialog = (title, body, placeholder = '') =>
+  dialog({ title, body, input: { placeholder }, okText: 'OK' });
+
 const tc = (s) => {
   if (s == null) return '';
   const m = Math.floor(s / 60), sec = (s % 60);
@@ -82,6 +152,7 @@ async function loadLibrary() {
       const r = await postJSON('/api/vidangel/autofetch',
         { path: b.dataset.path, force: true });
       if (r.status === 'fetched') {
+        toast(r.detail || 'Filters found.', 'ok');
         await loadLibrary();
       } else {
         // Anything short of a confident match goes straight to manual selection,
@@ -89,7 +160,7 @@ async function loadLibrary() {
         openPicker(b.dataset.path);
       }
     } catch (e) {
-      alert(e.message);
+      toast(e.message, 'error');
       b.disabled = false;
       b.textContent = 'Find';
     }
@@ -264,14 +335,15 @@ async function openPicker(path, initialQuery) {
         });
         if (r.status === 'fetched') {
           closeModal();
+          toast(r.detail || 'Filters attached.', 'ok');
           await loadLibrary();
         } else {
-          alert(`${r.status}: ${r.detail}`);
+          toast(`${r.status}: ${r.detail}`, 'warn');
           $$('.pkuse').forEach((x) => { x.disabled = false; });
           b.textContent = 'Use this';
         }
       } catch (e) {
-        alert(e.message);
+        toast(e.message, 'error');
         $$('.pkuse').forEach((x) => { x.disabled = false; });
         b.textContent = 'Use this';
       }
@@ -293,14 +365,22 @@ async function openPicker(path, initialQuery) {
     if (e.key === 'Enter') load($('#pkquery').value.trim());
   });
   $('#pkmanual').addEventListener('click', async () => {
-    const id = prompt('VidAngel tag-set id (from the filters request on vidangel.com):');
-    if (!id || !/^\d+$/.test(id.trim())) return;
+    const id = await promptDialog(
+      'Enter a tag-set id',
+      'Open the title on vidangel.com with DevTools on the Network tab, and copy the '
+      + 'number from the /api/bff/tag-sets/<id>/ request.',
+      'e.g. 46025');
+    if (id === null) return;
+    if (!/^\d+$/.test(id)) { toast('That is not a numeric tag-set id.', 'warn'); return; }
     try {
       const r = await postJSON('/api/vidangel/pick',
-        { path, tag_set_id: Number(id.trim()) });
-      if (r.status === 'fetched') { closeModal(); await loadLibrary(); }
-      else alert(`${r.status}: ${r.detail}`);
-    } catch (e) { alert(e.message); }
+        { path, tag_set_id: Number(id) });
+      if (r.status === 'fetched') {
+        closeModal();
+        toast(r.detail || 'Filters attached.', 'ok');
+        await loadLibrary();
+      } else { toast(`${r.status}: ${r.detail}`, 'warn'); }
+    } catch (e) { toast(e.message, 'error'); }
   });
 
   await load(initialQuery);
@@ -344,22 +424,25 @@ async function pollAutofetch() {
 $('#autofetch').addEventListener('click', async (e) => {
   const lib = $('#lib').value;
   const scope = lib ? `the ${lib} library` : 'all libraries';
-  if (!confirm(`Search VidAngel for filters across ${scope}?\n\n`
-    + 'Only close matches are fetched automatically; anything uncertain is listed for '
-    + 'you to confirm. Requests are throttled, so a large library takes a while.')) return;
+  const go = await confirmDialog(
+    `Search VidAngel across ${scope}?`,
+    'Only close matches are fetched automatically; anything uncertain is listed for you '
+    + 'to confirm. Requests are throttled, so a large library takes a while.',
+    { okText: 'Start search' });
+  if (!go) return;
   e.target.disabled = true;
   try {
     const r = await postJSON('/api/vidangel/autofetch',
       { library: lib || null, limit: 500, only_missing: true });
     if (!r.queued) {
-      alert(r.detail || 'nothing to match');
+      toast(r.detail || 'Nothing to match.', 'warn');
       return;
     }
     if (afPoll) clearInterval(afPoll);
     afPoll = setInterval(pollAutofetch, 1500);
     pollAutofetch();
   } catch (err) {
-    alert(`Could not start: ${err.message}`);
+    toast(`Could not start: ${err.message}`, 'error');
   } finally {
     e.target.disabled = false;
   }
@@ -374,7 +457,7 @@ $('#rescan').addEventListener('click', async (e) => {
       .filter(([k]) => !k.startsWith('_')).map(([k, v]) => `${k}: ${v}`).join(' · ');
     await loadLibrary();
   } catch (err) {
-    alert(`Scan failed: ${err.message}`);
+    toast(`Scan failed: ${err.message}`, 'error');
   } finally {
     e.target.disabled = false;
     e.target.textContent = 'Rescan library';
@@ -522,14 +605,14 @@ async function openFilter(path) {
   $('#manadd').addEventListener('click', () => {
     const kind = $('#mankind').value;
     const at = parseTime($('#manat').value);
-    if (at == null) { alert('Enter a time as mm:ss or seconds.'); return; }
+    if (at == null) { toast('Enter a time as mm:ss or seconds.', 'warn'); return; }
     if (kind === 'word') {
       const w = $('#manword').value.trim();
-      if (!w) { alert('Enter the word to mute.'); return; }
+      if (!w) { toast('Enter the word to mute.', 'warn'); return; }
       manual.push({ kind, word: w, at });
     } else {
       const end = parseTime($('#manend').value);
-      if (end == null || end <= at) { alert('End must be after start.'); return; }
+      if (end == null || end <= at) { toast('End must be after start.', 'warn'); return; }
       manual.push({ kind, start: at, end, snap: $('#mansnap').checked });
     }
     $('#manword').value = ''; $('#manat').value = ''; $('#manend').value = '';
@@ -616,7 +699,7 @@ async function loadRuns() {
     try {
       await postJSON(`/api/runs/${b.dataset.id}/cancel`, {});
       loadRuns();
-    } catch (e) { alert(e.message); }
+    } catch (e) { toast(e.message, 'error'); }
   }));
 }
 
@@ -689,7 +772,7 @@ async function showRun(id) {
         $$('.tab')[1].click();
         setTimeout(() => showRun(nr.run_id), 400);
       } catch (err) {
-        alert(`Could not re-run: ${err.message}`);
+        toast(`Could not re-run: ${err.message}`, 'error');
         e.target.disabled = false;
       }
     });
@@ -716,7 +799,7 @@ $('#addword').addEventListener('click', async () => {
     await postJSON('/api/words', { word, category: $('#newcat').value, enabled: true });
     $('#newword').value = '';
     loadWords();
-  } catch (e) { alert(e.message); }
+  } catch (e) { toast(e.message, 'error'); }
 });
 
 /* --------------------------------------------------------------- tag-sets */
@@ -853,7 +936,7 @@ async function resolveWork(workId, kind, title) {
       } catch (err) {
         b.textContent = original;
         b.disabled = false;
-        alert(`Fetch failed: ${err.message}`);
+        toast(`Fetch failed: ${err.message}`, 'error');
       }
     }));
 
