@@ -829,6 +829,77 @@ def api_run(body: RunIn):
     return {"run_id": run_id}
 
 
+@app.get("/api/title/history")
+def api_title_history(path: str):
+    """Everything known about past filtering of one title.
+
+    Runs are kept per title rather than only the latest, because a re-run after review
+    produces a different result and the earlier one explains why. The archive path is
+    included and existence-checked: it is the only route back to the raw cut, so knowing
+    whether it is still there matters before re-filtering.
+    """
+    if not library.within_roots(path):
+        raise HTTPException(403, "path is outside the configured library roots")
+
+    row = db.connect().execute(
+        """SELECT name, status, filtered_at, archive_path, tag_set_id, duration
+           FROM titles WHERE path=?""", (path,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown title")
+
+    runs = db.connect().execute(
+        """SELECT id, status, stage, progress, created_at, started_at, finished_at,
+                  error, options_json, report_json
+           FROM runs WHERE path=? ORDER BY id DESC""", (path,)).fetchall()
+
+    out_runs = []
+    for r in runs:
+        d = {k: r[k] for k in ("id", "status", "stage", "progress", "created_at",
+                               "started_at", "finished_at", "error")}
+        opts = json.loads(r["options_json"] or "{}")
+        rep = json.loads(r["report_json"] or "{}") if r["report_json"] else {}
+        inc = rep.get("incidents") or []
+        d["summary"] = {
+            "muted": len(rep.get("mutes") or []),
+            "video_cuts": len(rep.get("video_ranges") or []),
+            "verified": sum(1 for i in inc if str(i.get("status", "")).startswith("OK")),
+            "review": sum(1 for i in inc if i.get("status") == "REVIEW"),
+            "not_found": sum(1 for i in inc if i.get("status") == "NOT_FOUND"),
+            "pending_review": len((rep.get("scan") or {}).get("pending_review") or []),
+            "offset": (rep.get("offset") or {}).get("applied"),
+            "render": (rep.get("render") or {}).get("summary"),
+            "output": opts.get("output_path"),
+        }
+        d["options"] = {
+            "quality": opts.get("quality"), "model": opts.get("model"),
+            "categories": opts.get("categories"),
+            "video_categories": opts.get("video_categories"),
+            "tag_set_id": opts.get("tag_set_id"),
+            "videoskip_id": opts.get("videoskip_id"),
+            "do_scan": opts.get("do_scan"),
+            "detect_nudity": opts.get("detect_nudity"),
+            "manual_mutes": len(opts.get("manual_mutes") or []),
+            "manual_cuts": len(opts.get("manual_cuts") or []),
+        }
+        d["report"] = rep
+        out_runs.append(d)
+
+    archive = row["archive_path"]
+    decisions = db.connect().execute(
+        "SELECT at_time, word, action FROM decisions WHERE path=? ORDER BY at_time",
+        (path,)).fetchall()
+
+    return {
+        "path": path, "name": row["name"], "status": row["status"],
+        "filtered_at": row["filtered_at"], "duration": row["duration"],
+        "tag_set_id": row["tag_set_id"],
+        "archive_path": archive,
+        "archive_exists": bool(archive) and os.path.exists(archive),
+        "runs": out_runs,
+        "decisions": [dict(d) for d in decisions],
+    }
+
+
 @app.get("/api/runs")
 def api_runs(limit: int = 50):
     rows = db.connect().execute(

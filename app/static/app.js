@@ -64,7 +64,10 @@ async function loadLibrary() {
       <td class="muted">${esc(t.library)}</td>
       <td class="num">${t.size_gb} GB</td>
       <td>${audio}</td>
-      <td><span class="pill ${cls}">${esc(t.status)}</span></td>
+      <td>${t.status === 'unfiltered'
+            ? `<span class="pill">${esc(t.status)}</span>`
+            : `<button class="secondary histbtn" data-path="${esc(t.path)}"
+                 title="See what was filtered and how">${esc(t.status)}</button>`}</td>
       <td>${vidangelCell(t)}</td>
       <td><button data-path="${esc(t.path)}" class="filterbtn secondary">Filter…</button></td>
     </tr>`;
@@ -93,6 +96,8 @@ async function loadLibrary() {
   }));
   $$('.afpick').forEach((b) =>
     b.addEventListener('click', () => openPicker(b.dataset.path)));
+  $$('.histbtn').forEach((b) =>
+    b.addEventListener('click', () => openHistory(b.dataset.path)));
 }
 
 /** VidAngel column: a cached tag-set, a known-negative answer, or a lookup control.
@@ -110,6 +115,99 @@ function vidangelCell(t) {
   if (s === 'suggested') return pick('check…', '', t.autofetch_detail);
   if (s === 'error') return pick('retry', '', t.autofetch_detail);
   return `<button class="secondary afone" data-path="${esc(t.path)}">Find</button>`;
+}
+
+/* ----------------------------------------------------------- filter history */
+async function openHistory(path) {
+  modal.classList.remove('hidden');
+  $('#mtitle').textContent = 'Filter history';
+  $('#mbody').innerHTML = '<p class="muted">loading…</p>';
+
+  let h;
+  try {
+    h = await api(`/api/title/history?path=${encodeURIComponent(path)}`);
+  } catch (e) {
+    $('#mbody').innerHTML = `<span class="pill bad">${esc(e.message)}</span>`;
+    return;
+  }
+
+  const when = (s) => (s ? String(s).replace('T', ' ').replace(/\+.*$/, '') : '—');
+
+  // The archive is the only route back to the raw cut, so its absence is worth
+  // shouting about before anyone re-filters.
+  const archive = h.archive_path
+    ? (h.archive_exists
+        ? `<span class="pill ok">archived</span> <code>${esc(h.archive_path)}</code>`
+        : `<span class="pill bad">archive MISSING</span> <code>${esc(h.archive_path)}</code>
+           <br><span class="muted">Without it there is no way back to the unfiltered
+           original.</span>`)
+    : '<span class="pill warn">no archive recorded</span>';
+
+  $('#mbody').innerHTML = `
+    <p class="muted">${esc(h.name)}</p>
+    <fieldset><legend>Current state</legend>
+      <div>Status: <span class="pill ${h.status === 'filtered' ? 'ok' : 'bad'}"
+        >${esc(h.status)}</span>
+        &nbsp; Last filtered: <code>${esc(when(h.filtered_at))}</code></div>
+      <div style="margin-top:.4rem">${archive}</div>
+      ${h.tag_set_id ? `<div style="margin-top:.4rem">Tag-set
+        <code>#${h.tag_set_id}</code></div>` : ''}
+    </fieldset>
+    ${h.decisions.length ? `<fieldset><legend>Your review decisions
+      (${h.decisions.length})</legend>
+      <div class="chips">${h.decisions.map((d) => `<span class="chip">
+        ${tc(d.at_time)} ${esc(d.word === '__nudity__' ? 'scene' : d.word)}
+        <span class="muted">${esc(d.action)}</span></span>`).join('')}</div>
+      <p class="muted">Remembered across runs — a re-run applies them.</p>
+      </fieldset>` : ''}
+    <fieldset><legend>Runs (${h.runs.length})</legend>
+      ${h.runs.length ? `<table><thead><tr>
+        <th>#</th><th>When</th><th>Status</th><th>Mutes</th><th>Cuts</th>
+        <th>Review</th><th></th></tr></thead><tbody>
+        ${h.runs.map((r) => `<tr>
+          <td class="num">${r.id}</td>
+          <td class="muted">${esc(when(r.finished_at || r.created_at))}</td>
+          <td><span class="pill ${r.status === 'done' ? 'ok'
+            : r.status === 'failed' ? 'bad' : 'warn'}">${esc(r.status)}</span></td>
+          <td class="num">${r.summary.muted}</td>
+          <td class="num">${r.summary.video_cuts || ''}</td>
+          <td class="num">${(r.summary.review + r.summary.not_found
+            + r.summary.pending_review) || ''}</td>
+          <td><button class="secondary histrun" data-id="${r.id}">Details</button></td>
+        </tr>`).join('')}</tbody></table>`
+      : '<p class="muted">No runs recorded.</p>'}
+    </fieldset>
+    ${h.runs.length ? `<fieldset><legend>Most recent configuration</legend>
+      <div class="grid2">
+        <div>
+          <div>Audio quality: <code>${esc(h.runs[0].options.quality || '—')}</code></div>
+          <div>Whisper model: <code>${esc(h.runs[0].options.model || '—')}</code></div>
+          <div>Word-list scan: <code>${h.runs[0].options.do_scan ? 'yes' : 'no'}</code></div>
+          <div>Nudity detection:
+            <code>${h.runs[0].options.detect_nudity ? 'yes' : 'no'}</code></div>
+        </div>
+        <div>
+          <div>Categories:
+            <code>${esc((h.runs[0].options.categories || []).join(', ') || '—')}</code></div>
+          <div>Video categories:
+            <code>${esc((h.runs[0].options.video_categories || []).join(', ') || '—')}</code></div>
+          <div>Manual: <code>${h.runs[0].options.manual_mutes} mute(s),
+            ${h.runs[0].options.manual_cuts} cut(s)</code></div>
+          ${h.runs[0].summary.offset != null
+            ? `<div>Offset applied:
+                 <code>${h.runs[0].summary.offset > 0 ? '+' : ''}${h.runs[0].summary.offset}s</code></div>`
+            : ''}
+        </div>
+      </div>
+      ${h.runs[0].summary.render
+        ? `<div style="margin-top:.5rem" class="muted">${esc(h.runs[0].summary.render)}</div>`
+        : ''}
+      ${h.runs[0].summary.output
+        ? `<div class="muted"><code>${esc(h.runs[0].summary.output)}</code></div>` : ''}
+      </fieldset>` : ''}`;
+
+  $$('.histrun').forEach((b) =>
+    b.addEventListener('click', () => showRun(b.dataset.id)));
 }
 
 /* --------------------------------------------------- manual VidAngel match picker */
