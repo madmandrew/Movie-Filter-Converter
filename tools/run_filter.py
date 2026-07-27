@@ -73,9 +73,12 @@ def build(video: str, tagset_path: str, categories, model_size="small.en",
                 best = mt
 
         if best is None:
-            results.append({"ref_id": inc.ref_id, "word": inc.words[0],
+            # `words` can be empty for a category that names an action rather than a
+            # word, so never index it directly.
+            label = inc.words[0] if inc.words else (inc.category_key or "incident")
+            results.append({"ref_id": inc.ref_id, "word": label,
                             "bucket": inc.start_approx, "status": "NOT_FOUND"})
-            print(f"  {inc.ref_id} {inc.words[0]:<6} bucket {inc.start_approx:6.0f}  NOT FOUND")
+            print(f"  {inc.ref_id} {label:<6} bucket {inc.start_approx:6.0f}  NOT FOUND")
             continue
 
         s, e, v, rounds = tighten(video, best.expected, best.start, best.end, fps,

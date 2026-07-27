@@ -311,8 +311,31 @@ def _execute(run_id: int) -> None:
         report_offset = {}
 
     for n, inc in enumerate(todo):
-        _stage(run_id, f"locating {inc.words[0]} @{inc.start_approx:.0f}s",
+        # An incident may name no word at all — a category describing an action rather
+        # than something said. Indexing words[0] crashed the whole run on the first such
+        # incident, which selecting individual incidents by hand made easy to hit.
+        label = inc.words[0] if inc.words else (inc.category_key or "incident")
+        _stage(run_id, f"locating {label} @{inc.start_approx:.0f}s",
                10 + 30 * n / max(1, len(todo)))
+
+        if not inc.words:
+            # Nothing to search for, so fall back to the tag's own timing rather than
+            # dropping it silently. Offset-corrected and frame-snapped, but unverified.
+            s = max(0.0, inc.start_approx + tag_offset)
+            e = max(inc.end_approx, inc.start_approx + 1.0) + tag_offset
+            s, e = snap_to_frames(s, e, fps)
+            mutes.append((inc.ref_id, s, e))
+            results.append({
+                "ref_id": inc.ref_id, "word": label, "bucket": inc.start_approx,
+                "start": round(s, 3), "end": round(e, 3),
+                "status": "OK_UNVERIFIED",
+                "note": f"'{inc.category_key}' names no searchable word; used the "
+                        f"tag's own timing (offset-corrected, not verified)",
+            })
+            _log(run_id, f"  {inc.ref_id} {label}: no searchable word, used tag timing "
+                         f"{s:.3f}-{e:.3f}")
+            continue
+
         w0, w1 = inc.search_window()
         centre = inc.start_approx + tag_offset
         best = None
@@ -322,7 +345,7 @@ def _execute(run_id: int) -> None:
             if m and (best is None or m.confidence > best.confidence):
                 best = m
         if best is None:
-            results.append({"ref_id": inc.ref_id, "word": inc.words[0],
+            results.append({"ref_id": inc.ref_id, "word": label,
                             "bucket": inc.start_approx, "status": "NOT_FOUND"})
             continue
         s, e, v, rounds = tighten(path, best.expected, best.start, best.end, fps,

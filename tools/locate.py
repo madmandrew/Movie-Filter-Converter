@@ -55,6 +55,11 @@ _FALSE_FRIENDS = {
     # "damn" — note "damned" is NOT here: it is a real inflection, not a false friend.
     # "dam" is deliberately absent too: it is a listed _SOFTENED stand-in for "damn".
     "dame", "amsterdam",
+    # Inflections of mild words that are innocent in their own right. "sucker" is not
+    # profanity even though "suck" is on the list, and the -er suffix rule would
+    # otherwise match it.
+    "sucker", "suckers", "sucking", "screwdriver", "screwy", "pricker",
+    "cocker", "cockerel", "stupider",
     # "god" / "christ" - "christmas" and "christian" are not blasphemy
     "goddess", "gospel", "gone", "going", "good", "christmas", "christian",
     "christina", "christopher", "godfather", "godmother", "godsend",

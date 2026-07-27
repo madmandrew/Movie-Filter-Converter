@@ -23,6 +23,21 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
+#: Category keys that describe a *kind of content* rather than a spoken word. Searching
+#: the audio for "immodesty" or "violence" would find nothing, and worse, a match on the
+#: literal word would mute an innocent mention of it. Observed on real tag-sets.
+_NON_WORD_KEYS = frozenset({
+    "profanity", "blasphemy", "language", "language_racial", "language_childish",
+    "language_sexual", "immodesty", "immodesty_male", "immodesty_female",
+    "immodesty_both", "nudity", "nudity_male", "nudity_female", "sex_any",
+    "non_graphic", "graphic", "violence", "gore", "objectionable", "implied",
+    "implied_not_shown", "shown_w_nudity", "shown_w_o_nudity", "sexual_assault",
+    "sexually_suggestive", "vulgar_gestures", "bodily_functions", "human_functions",
+    "life_events", "credits", "opening_credits", "closing_credits",
+    "alcohol_or_drug_use", "drugs_legal", "drugs_implied", "drugs_illegal",
+    "smoking", "gambling", "occult", "disturbing", "intense", "scary",
+})
+
 #: Categories to act on. Deliberately narrow: the goal is muting individual swear
 #: words, NOT blanking whole phrases, sentences, or scenes. Prose-described tags
 #: ("A man makes a sexual reference about women.") name no word, so word-spotting
@@ -45,6 +60,33 @@ _WORD_KEYS = {
     "piss": ["piss", "pissed"],
     "dick": ["dick"],
     "fuck": ["fuck", "fucking", "fucker"],
+    # Keys seen on real tag-sets that were missing here. Their absence made the incident
+    # unlocatable, and since a category name is the only fallback, selecting one by hand
+    # crashed on an empty word list.
+    "jesus": ["jesus", "christ"],
+    "christ": ["christ", "jesus"],
+    "cock": ["cock"],
+    "pussy": ["pussy"],
+    "whore": ["whore"],
+    "slut": ["slut"],
+    "fag": ["fag", "faggot"],
+    "nigger": ["nigger", "nigga"],
+    "retard": ["retard", "retarded"],
+    "bollocks": ["bollocks"],
+    "bugger": ["bugger"],
+    "wanker": ["wanker"],
+    "twat": ["twat"],
+    "prick": ["prick"],
+    "cunt": ["cunt"],
+    "arse": ["arse", "arsehole"],
+    "bloody": ["bloody"],
+    "stupid": ["stupid"],
+    "idiot": ["idiot"],
+    "moron": ["moron"],
+    "jackass": ["jackass"],
+    "screw": ["screw", "screwed"],
+    "suck": ["suck", "sucks"],
+    "freaking": ["freaking", "fricking"],
 }
 
 #: Tag times are quantised to 6s multiples, but measurement on real data shows the
@@ -71,8 +113,22 @@ class Incident:
 
     @property
     def words(self) -> list[str]:
-        """Candidate spoken words, or [] if this incident has no specific word."""
-        return _WORD_KEYS.get(self.category_key, [])
+        """Candidate spoken words, or [] if this incident has no specific word.
+
+        Falls back to the category key itself when it is not in `_WORD_KEYS`. VidAngel
+        names word categories after the word (`cock`, `jesus`, `bollocks`), so the key is
+        a good guess and keeps a newly-seen category locatable instead of silently
+        unusable — the map can never be exhaustive. `other_*` keys are prose descriptions
+        of an action, not words, so they stay empty.
+        """
+        mapped = _WORD_KEYS.get(self.category_key)
+        if mapped:
+            return mapped
+        key = self.category_key
+        if (key and not key.startswith("other")
+                and key not in _NON_WORD_KEYS and key.isalpha()):
+            return [key]
+        return []
 
     @property
     def locatable(self) -> bool:

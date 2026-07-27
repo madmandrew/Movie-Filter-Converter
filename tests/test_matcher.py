@@ -18,7 +18,9 @@ sys.path.insert(
 from locate import _matches, _variants  # noqa: E402
 
 WORDS = ["damn", "hell", "ass", "bullshit", "god", "christ", "fuck", "shit",
-         "bitch", "douche", "dick", "piss", "crap", "bastard"]
+         "bitch", "douche", "dick", "piss", "crap", "bastard",
+         # Added after real tag-sets used these category keys.
+         "cock", "jesus", "stupid", "prick", "screw", "suck", "arse", "pussy"]
 
 SHOULD_MATCH = [
     "damn", "damned", "hell", "ass", "asses", "bullshit", "god", "christ",
@@ -37,6 +39,15 @@ SHOULD_NOT = [
     "dictionary", "pistol", "scrap", "dame", "godfather", "asset", "brass",
     # Ordinary words that appeared adjacent to real mutes during testing.
     "the", "and", "paper", "real", "vigil", "candlelight", "partner", "news",
+    # Innocent words containing a newer target. "sucker" was a real false positive:
+    # the -er suffix rule matched it against "suck".
+    "sucker", "suckers", "sucking", "cockpit", "cocktail", "peacock", "cocker",
+    "screwdriver", "stupidity", "arsenal", "pussycat", "prickle",
+]
+
+SHOULD_MATCH_EXTRA = [
+    "cock", "cocks", "jesus", "christ", "stupid", "prick", "screw", "screwed",
+    "suck", "sucks", "arse", "pussy",
 ]
 
 
@@ -46,7 +57,7 @@ def main() -> int:
         targets |= _variants(w)
 
     failures = []
-    for w in SHOULD_MATCH:
+    for w in SHOULD_MATCH + SHOULD_MATCH_EXTRA:
         if not _matches(w, targets):
             failures.append(f"  MISS  {w!r} should match")
     for w in SHOULD_NOT:
@@ -54,7 +65,7 @@ def main() -> int:
             failures.append(f"  FALSE {w!r} should NOT match")
 
     print(f"{len(targets)} target spellings from {len(WORDS)} words")
-    print(f"{len(SHOULD_MATCH)} must match, {len(SHOULD_NOT)} must not")
+    print(f"{len(SHOULD_MATCH)+len(SHOULD_MATCH_EXTRA)} must match, {len(SHOULD_NOT)} must not")
     if failures:
         print(f"\n{len(failures)} FAILURES:")
         print("\n".join(failures))
