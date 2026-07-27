@@ -207,19 +207,23 @@ def _execute(run_id: int) -> None:
     source = "no tag-set"
     audio_refs = set(opts.get("audio_refs") or [])
     if ts:
+        # Explicitly chosen refs are an exact instruction and are resolved against the
+        # WHOLE tag-set. `only_enabled` is a convenience filter for "start from what
+        # VidAngel already had on"; applying it first silently discarded every hand-picked
+        # incident, then reported them as non-existent. A selection the user made by
+        # ticking boxes must never be narrowed by a checkbox they left set.
+        by_ref = [i for i in ts.incidents
+                  if i.ref_id in audio_refs and i.kind == "audio"]
+
         pool = ts.enabled() if opts.get("only_enabled") else ts.incidents
-        # "Only tags enabled in VidAngel" combined with a category selection is almost
-        # always a mistake: a tag-set typically has a handful of enabled tags, so
-        # intersecting the two silently yields nothing. Warn and use the full set rather
-        # than run a long job that can only produce zero mutes.
+        # Same trap for categories: a tag-set usually has a handful of enabled tags, so
+        # intersecting them with a category choice tends to yield nothing.
         if (opts.get("only_enabled") and categories
                 and not any(i.category_key in categories for i in pool)):
             _log(run_id, f"WARNING 'only tags enabled in VidAngel' left {len(pool)} tag(s), "
                          f"none in {categories}; using all {len(ts.incidents)} incidents "
                          f"instead")
             pool = ts.incidents
-
-        by_ref = [i for i in pool if i.ref_id in audio_refs and i.kind == "audio"]
         by_cat = [i for i in pool if i.category_key in categories]
 
         if by_ref:
@@ -251,6 +255,12 @@ def _execute(run_id: int) -> None:
     # This is also why picking the "right" streaming offering barely matters: the timeline
     # is measured from the local audio, not trusted from the source.
     tag_offset = 0.0
+    #: How far the tag-set's runtime may differ from the file before its timings are
+    #: untrustworthy for video. Audio survives a mismatch because every word is located
+    #: in the local track; video cannot be located at all, so a bad offset cuts the wrong
+    #: footage — measured on a real run: a -27s mismatch put an 18s cut 4s past the end
+    #: of the content it was meant to remove.
+    RUNTIME_TOLERANCE = 10.0
     if todo and opts.get("auto_offset", True):
         _stage(run_id, "estimating source offset", 8)
         import offset as off_mod
@@ -595,6 +605,28 @@ def _execute(run_id: int) -> None:
             _log(run_id, f"{len(cuts)} scene cuts detected")
 
         vr = []
+        # Refuse tagged video cuts when the timeline is unverified.
+        #
+        # A video range cannot be located in the file the way a word can, so it inherits
+        # the source's timing wholesale. If the tag-set is keyed to a different cut and no
+        # audio offset was measured to correct it, the cut lands on the wrong footage —
+        # removing good material and leaving the content it targeted. Better to skip and
+        # say so than to damage the file while reporting success.
+        delta = duration - (ts.runtime_unaltered or 0) if ts else 0.0
+        unverified = (
+            want_tagged_video
+            and abs(delta) > RUNTIME_TOLERANCE
+            and not (report_offset or {}).get("confident")
+        )
+        if unverified:
+            _log(run_id,
+                 f"SKIPPING video cuts: the tag-set runtime differs from this file by "
+                 f"{delta:+.0f}s and no audio offset could be measured to correct it. "
+                 f"Video ranges cannot be located in the file, so cutting now would "
+                 f"remove the wrong footage. Enable the word-list scan or select audio "
+                 f"incidents so an offset can be derived, or add the cut manually.")
+            want_tagged_video = False
+
         if want_tagged_video:
             wanted = set(opts.get("video_categories") or ())
             video_refs = set(opts.get("video_refs") or [])
