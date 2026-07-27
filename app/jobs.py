@@ -145,6 +145,10 @@ def _execute(run_id: int) -> None:
     if run is None or run["status"] == "cancelled":
         return
     path = run["path"]
+    # The title's identity in the library, kept separate from the file actually being
+    # read: a re-run reassigns `path` to the archive, and every database update keyed on
+    # `path` would then match nothing.
+    title_path = run["path"]
     opts = json.loads(run["options_json"] or "{}")
 
     with tx() as c:
@@ -410,7 +414,10 @@ def _execute(run_id: int) -> None:
         decided = {
             (round(r["at_time"], 2), r["word"]): r["action"]
             for r in conn.execute(
-                "SELECT at_time, word, action FROM decisions WHERE path=?", (path,)
+                # Keyed on the title, not the file being read: a re-run reads the archive,
+                # and looking decisions up by that path would silently discard every
+                # review the user had already made.
+                "SELECT at_time, word, action FROM decisions WHERE path=?", (title_path,)
             ).fetchall()
         }
         auto, pending = [], []
@@ -597,8 +604,9 @@ def _execute(run_id: int) -> None:
         decided = {
             round(r["at_time"], 1): r["action"]
             for r in conn.execute(
+                # Keyed on the title, not the archive a re-run reads from.
                 "SELECT at_time, action FROM decisions WHERE path=? AND word='__nudity__'",
-                (path,),
+                (title_path,),
             ).fetchall()
         }
         pending, approved = [], []
@@ -756,7 +764,10 @@ def _execute(run_id: int) -> None:
 
     mutes.sort(key=lambda m: m[1])
     report = {
-        "path": path, "fps": fps, "duration": duration,
+        # The title, plus the file actually read when a re-run sourced the archive.
+        "path": title_path,
+        "source_path": path if path != title_path else None,
+        "fps": fps, "duration": duration,
         "incidents": results, "mutes": mutes,
         "scan": scan_report, "video_ranges": video_ranges,
         "nudity": nudity_report,
@@ -881,5 +892,5 @@ def _execute(run_id: int) -> None:
             """UPDATE titles SET status='filtered', filtered_at=?, report_json=?,
                                  archive_path=?, tag_set_id=?
                WHERE path=?""",
-            (_now(), json.dumps(report), archive, opts.get("tag_set_id"), path),
+            (_now(), json.dumps(report), archive, opts.get("tag_set_id"), title_path),
         )
