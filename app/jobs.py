@@ -161,18 +161,30 @@ def _execute(run_id: int) -> None:
 
     # ---- audio incidents from the tag-set ---------------------------------------
     todo = []
+    source = "no tag-set"
     audio_refs = set(opts.get("audio_refs") or [])
     if ts:
         pool = ts.enabled() if opts.get("only_enabled") else ts.incidents
-        if audio_refs:
+        by_ref = [i for i in pool if i.ref_id in audio_refs and i.kind == "audio"]
+        by_cat = [i for i in pool if i.category_key in categories]
+
+        if by_ref:
             # Individually-chosen incidents. Selecting one scene from a category and
             # leaving its siblings alone is only expressible per ref_id — a category
             # name cannot say "this rape reference but not that one".
-            todo = [i for i in pool if i.ref_id in audio_refs and i.kind == "audio"]
+            todo = by_ref
+            source = "by ref"
         else:
-            todo = [i for i in pool if i.category_key in categories]
-    _log(run_id, f"{len(todo)} tagged audio incidents "
-                 f"({'by ref' if audio_refs else str(categories)})")
+            # Refs that match nothing usually mean they came from a different tag-set —
+            # a re-run pointed at another cut, say. Falling back to the categories beats
+            # silently filtering nothing, which is what a strict `if audio_refs` did.
+            todo = by_cat
+            source = str(categories)
+            if audio_refs:
+                _log(run_id, f"WARNING none of the {len(audio_refs)} selected incidents "
+                             f"exist in tag-set {opts.get('tag_set_id')}; falling back to "
+                             f"categories {categories or '(none)'}")
+    _log(run_id, f"{len(todo)} tagged audio incidents ({source})")
 
     # Estimate the source-to-file offset BEFORE locating anything.
     #
@@ -419,12 +431,28 @@ def _execute(run_id: int) -> None:
         _stage(run_id, "scanning for nudity", 62)
         import nudity as nud
 
+        # An explicit window scans one span instead of the whole film. `scan_video`
+        # reports absolute timestamps either way (it offsets sampled frames by `start`),
+        # so review decisions keyed on those timestamps stay valid across a re-run with a
+        # different window.
+        n_start = opts.get("nudity_start")
+        n_end = opts.get("nudity_end")
+        n_start = float(n_start) if n_start is not None else 0.0
+        n_end = float(n_end) if n_end is not None else None
+        if n_end is not None and duration:
+            n_end = min(n_end, duration)
+
         found = nud.scan_video(
             path,
             sample_fps=float(opts.get("nudity_fps", 1.0)),
             min_score=float(opts.get("nudity_min_score", nud.MIN_SCORE)),
             min_hits=int(opts.get("nudity_min_hits", 2)),
+            start=n_start,
+            end=n_end,
         )
+        if n_start or n_end is not None:
+            _log(run_id, f"nudity scan window: {n_start:.1f}s - "
+                         f"{f'{n_end:.1f}s' if n_end is not None else 'end'}")
         _log(run_id, f"nudity scan: {len(found)} candidate ranges")
 
         decided = {
@@ -445,6 +473,11 @@ def _execute(run_id: int) -> None:
         nudity_report = {
             "candidates": len(found),
             "approved": len(approved),
+            # Recorded so a reviewer can tell "nothing found" apart from "nothing found
+            # *in the part that was scanned*" — the two look identical in the UI
+            # otherwise, and only one of them means the title is clean.
+            "window": ([round(n_start, 2), round(n_end, 2) if n_end is not None else None]
+                       if (n_start or n_end is not None) else None),
             "pending_review": [
                 {"start": round(r.start, 3), "end": round(r.end, 3),
                  "classes": r.classes,
@@ -479,13 +512,20 @@ def _execute(run_id: int) -> None:
 
         vr = []
         if want_tagged_video:
-            wanted = set(opts["video_categories"])
+            wanted = set(opts.get("video_categories") or ())
             video_refs = set(opts.get("video_refs") or [])
+            # Same fallback as the audio path: refs matching nothing (a re-run pointed at
+            # a different tag-set) would otherwise silently cut nothing at all.
+            usable_refs = video_refs & {i.ref_id for i in ts.incidents}
+            if video_refs and not usable_refs:
+                _log(run_id, f"WARNING none of the {len(video_refs)} selected video "
+                             f"incidents exist in this tag-set; falling back to "
+                             f"categories {sorted(wanted) or '(none)'}")
             for inc in ts.incidents:
                 if inc.kind != "audiovisual" or inc.is_structural:
                     continue
-                if video_refs:
-                    if inc.ref_id not in video_refs:
+                if usable_refs:
+                    if inc.ref_id not in usable_refs:
                         continue
                 elif inc.category_key not in wanted and inc.category_title not in wanted:
                     continue
@@ -564,19 +604,58 @@ def _execute(run_id: int) -> None:
                 check.append((max(0.0, joint - 1.5), joint + 1.5))
 
             survivors = nud.verify_absent(out, check)
+
+            # A survivor at a join only means the cut failed if that content was in scope
+            # to begin with. On a windowed scan, nudity just outside the window is
+            # expected to remain — it was never detected, so it was never approved — and
+            # reporting it as "not clean" would read as a broken cut rather than as the
+            # window doing exactly what was asked.
+            def _to_source(out_t: float) -> float:
+                """Map an output timestamp back onto the source timeline.
+
+                Cuts must be walked in order against a *running* output position: each
+                removed range shifts everything after it, so comparing an output time
+                directly against a source-time cut boundary mixes the two timelines and
+                lands inside ranges that were actually removed.
+                """
+                src = out_t
+                for c in ordered:
+                    if c["start"] <= src:
+                        src += c["end"] - c["start"]
+                return src
+
+            in_scope = []
+            out_of_scope = []
+            for s in survivors:
+                src_t = _to_source(s.time)
+                windowed = nudity_report.get("window")
+                if windowed:
+                    w_start, w_end = windowed[0] or 0.0, windowed[1]
+                    if src_t < w_start or (w_end is not None and src_t > w_end):
+                        out_of_scope.append(s)
+                        continue
+                in_scope.append(s)
+
             report["nudity_verify"] = {
                 "checked_regions": len(check),
                 "survivors": [
                     {"at": round(s.time, 3), "class": s.cls, "score": round(s.score, 2)}
-                    for s in survivors
+                    for s in in_scope
                 ],
-                "clean": not survivors,
+                "outside_scan_window": [
+                    {"at": round(s.time, 3), "class": s.cls, "score": round(s.score, 2)}
+                    for s in out_of_scope
+                ],
+                "clean": not in_scope,
             }
-            if survivors:
-                _log(run_id, f"  WARNING: {len(survivors)} nudity detections remain in "
+            if in_scope:
+                _log(run_id, f"  WARNING: {len(in_scope)} nudity detections remain in "
                              f"the output — review before keeping this file")
             else:
                 _log(run_id, f"  verified: no nudity detected at {len(check)} cut joins")
+            if out_of_scope:
+                _log(run_id, f"  note: {len(out_of_scope)} detections remain outside the "
+                             f"scan window — re-run over the whole film to catch them")
 
     _stage(run_id, "done", 100)
     with tx() as c:

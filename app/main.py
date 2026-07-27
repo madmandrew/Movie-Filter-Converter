@@ -789,6 +789,12 @@ class RunIn(BaseModel):
     nudity_min_score: float = 0.35
     nudity_min_hits: int = 2
     verify_nudity: bool = True
+    #: Limit the nudity scan to one span of the film. Detection is the slow part of a run
+    #: (a full pass costs minutes), so scanning only the reel you care about is the
+    #: difference between a targeted re-run and re-scanning the whole title. None on both
+    #: means scan everything.
+    nudity_start: float | None = None
+    nudity_end: float | None = None
     quality: str = "splice"
     model: str = "small.en"
     do_scan: bool = True
@@ -820,6 +826,14 @@ def api_run(body: RunIn):
     for cvt in body.manual_cuts:
         if cvt.end <= cvt.start:
             raise HTTPException(400, f"cut end must be after start ({cvt.start}-{cvt.end})")
+
+    ns, ne = body.nudity_start, body.nudity_end
+    if (ns is not None or ne is not None) and not body.detect_nudity:
+        raise HTTPException(400, "nudity_start/nudity_end need nudity detection enabled")
+    if ns is not None and ns < 0:
+        raise HTTPException(400, "nudity_start cannot be negative")
+    if ns is not None and ne is not None and ne <= ns:
+        raise HTTPException(400, f"nudity window end must be after start ({ns}-{ne})")
 
     opts = body.model_dump()
     if opts["words"] is None:
@@ -936,6 +950,22 @@ def api_run_detail(run_id: int):
             d[key.replace("_json", "")] = json.loads(d[key])
         d.pop(key, None)
     return d
+
+
+@app.get("/api/runs/{run_id}/options")
+def api_run_options(run_id: int):
+    """A run's full options, for reopening the filter dialog prefilled.
+
+    Re-running unchanged is useless for a failed run — the four archive failures in
+    testing would all have failed again identically. Editing before re-running is the
+    point, so the raw options come back rather than a summary.
+    """
+    row = db.connect().execute(
+        "SELECT path, options_json, status FROM runs WHERE id=?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown run")
+    return {"path": row["path"], "status": row["status"],
+            "options": json.loads(row["options_json"] or "{}")}
 
 
 @app.post("/api/runs/{run_id}/rerun")

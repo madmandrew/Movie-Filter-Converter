@@ -102,6 +102,15 @@ const tc = (s) => {
   return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 };
 
+// "yes" is misleading for a windowed run — it reads as "the whole title was checked".
+const nudityScopeLabel = (o) => {
+  if (!o || !o.detect_nudity) return 'no';
+  const s = o.nudity_start;
+  const e = o.nudity_end;
+  if ((s == null || s === 0) && e == null) return 'whole film';
+  return `${tc(s || 0)}–${e != null ? tc(e) : 'end'} only`;
+};
+
 /* ------------------------------------------------------------------- tabs */
 $$('.tab').forEach((b) => b.addEventListener('click', () => {
   $$('.tab').forEach((x) => x.classList.toggle('active', x === b));
@@ -250,7 +259,9 @@ async function openHistory(path) {
           <td class="num">${r.summary.video_cuts || ''}</td>
           <td class="num">${(r.summary.review + r.summary.not_found
             + r.summary.pending_review) || ''}</td>
-          <td><button class="secondary histrun" data-id="${r.id}">Details</button></td>
+          <td><button class="secondary histrun" data-id="${r.id}">Details</button>
+            <button class="secondary histedit" data-id="${r.id}"
+              title="Reopen these settings to adjust and re-run">Edit</button></td>
         </tr>`).join('')}</tbody></table>`
       : '<p class="muted">No runs recorded.</p>'}
     </fieldset>
@@ -261,7 +272,7 @@ async function openHistory(path) {
           <div>Whisper model: <code>${esc(h.runs[0].options.model || '—')}</code></div>
           <div>Word-list scan: <code>${h.runs[0].options.do_scan ? 'yes' : 'no'}</code></div>
           <div>Nudity detection:
-            <code>${h.runs[0].options.detect_nudity ? 'yes' : 'no'}</code></div>
+            <code>${nudityScopeLabel(h.runs[0].options)}</code></div>
         </div>
         <div>
           <div>Categories:
@@ -285,6 +296,8 @@ async function openHistory(path) {
 
   $$('.histrun').forEach((b) =>
     b.addEventListener('click', () => showRun(b.dataset.id)));
+  $$('.histedit').forEach((b) =>
+    b.addEventListener('click', () => editRun(b.dataset.id)));
 }
 
 /* --------------------------------------------------- manual VidAngel match picker */
@@ -481,7 +494,21 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal();
 });
 
-async function openFilter(path) {
+/** Reopen the filter dialog seeded from a previous run, so its settings can be
+ *  adjusted before re-running. A failed run re-run unchanged just fails the same way. */
+async function editRun(runId) {
+  try {
+    const d = await api(`/api/runs/${runId}/options`);
+    await openFilter(d.path, d.options);
+    toast(`Loaded settings from run #${runId} — adjust and queue when ready.`, 'info');
+  } catch (e) {
+    toast(`Could not load run #${runId}: ${e.message}`, 'error');
+  }
+}
+
+/** Open the filter dialog. `prefill` is a previous run's options, so a failed or
+ *  earlier run can be reopened, adjusted and re-run rather than rebuilt by hand. */
+async function openFilter(path, prefill = null) {
   modal.classList.remove('hidden');
   $('#mtitle').textContent = path.split(/[\\/]/).pop();
   $('#mbody').innerHTML = '<p class="muted">Probing…</p>';
@@ -492,6 +519,22 @@ async function openFilter(path) {
   // use its result rather than reimplementing the stop-token logic here and letting the
   // two drift apart.
   const searchTitle = t.parsed_title || t.name || '';
+  // Previous run's options, with the same defaults a fresh dialog would use. Every
+  // field reads from here so reopening a run reproduces it exactly before any edits.
+  const pf = {
+    quality: 'splice', model: 'small.en', do_scan: true, only_enabled: false,
+    detect_nudity: false, nudity_start: null, nudity_end: null,
+    categories: [], video_categories: [],
+    audio_refs: [], video_refs: [], manual_mutes: [], manual_cuts: [],
+    tag_set_id: null, videoskip_id: null, output_path: null, archive_path: null,
+    ...(prefill || {}),
+  };
+  // A start of 0 with no end is the same as scanning everything, so only treat the run as
+  // windowed when it actually narrowed something.
+  const pfNudeWindow = (pf.nudity_start != null && pf.nudity_start > 0)
+    || pf.nudity_end != null;
+  const pfRefs = new Set([...(pf.audio_refs || []), ...(pf.video_refs || [])]);
+  const pfCats = new Set([...(pf.categories || []), ...(pf.video_categories || [])]);
 
   let groupsHtml = '<p class="muted">No tag-set linked. The word-list scan still runs.</p>';
   let tsSelect = '<option value="">none</option>';
@@ -503,7 +546,12 @@ async function openFilter(path) {
       const delta = x.runtime_delta != null
         ? ` — ${x.runtime_delta > 0 ? '+' : ''}${x.runtime_delta}s vs this file` : '';
       const tag = x.linked ? ' ✓ linked' : '';
-      return `<option value="${x.tag_set_id}"${x.linked ? ' selected' : ''}
+      // A reopened run's own tag-set wins over the linked default, so reproducing it
+      // does not silently switch source.
+      const chosen = pf.tag_set_id != null
+        ? x.tag_set_id === pf.tag_set_id
+        : x.linked;
+      return `<option value="${x.tag_set_id}"${chosen ? ' selected' : ''}
         >#${x.tag_set_id} ${esc(x.title_hint || '')}${delta}${tag}</option>`;
     }).join('');
   }
@@ -518,11 +566,14 @@ async function openFilter(path) {
           Atmos/DTS:X object metadata cannot survive filtering.</p>` : ''}
       </fieldset>
       <fieldset><legend>Audio quality</legend>
-        <label class="row"><input type="radio" name="q" value="splice" checked>
+        <label class="row"><input type="radio" name="q" value="splice"
+          ${pf.quality === 'splice' ? 'checked' : ''}>
           <span>Splice <code>— only muted frames re-encoded, size-neutral</code></span></label>
-        <label class="row"><input type="radio" name="q" value="same">
+        <label class="row"><input type="radio" name="q" value="same"
+          ${pf.quality === 'same' ? 'checked' : ''}>
           <span>Same codec <code>— whole track, inaudible loss</code></span></label>
-        <label class="row"><input type="radio" name="q" value="lossless">
+        <label class="row"><input type="radio" name="q" value="lossless"
+          ${pf.quality === 'lossless' ? 'checked' : ''}>
           <span>Lossless FLAC <code>— bit-exact, ~1.8× audio size</code></span></label>
       </fieldset>
     </div>
@@ -548,18 +599,48 @@ async function openFilter(path) {
       </div>
     </fieldset>
     <fieldset><legend>Word-list scan</legend>
-      <label class="row"><input type="checkbox" id="mscan" checked>
+      <label class="row"><input type="checkbox" id="mscan"
+        ${pf.do_scan ? 'checked' : ''}>
         <span>Scan the whole track for word-list matches
           <code>— finds words VidAngel missed; hits await your review</code></span></label>
-      <label class="row"><input type="checkbox" id="monlyen">
+      <label class="row"><input type="checkbox" id="monlyen"
+        ${pf.only_enabled ? 'checked' : ''}>
         <span>Only tags already enabled in VidAngel
           <code>— use your existing selections instead of whole categories</code></span></label>
+      <label class="row"><input type="checkbox" id="mnude"
+        ${pf.detect_nudity ? 'checked' : ''}>
+        <span>Scan video for nudity
+          <code>— candidates await your review, never cut automatically</code></span></label>
+      <div id="mnudeopts" class="${pf.detect_nudity ? '' : 'hidden'}"
+        style="margin:.35rem 0 .35rem 1.6rem">
+        <label class="row">
+          <span>Scan</span>
+          <select id="mnudescope">
+            <option value="all"${pfNudeWindow ? '' : ' selected'}>the whole film</option>
+            <option value="window"${pfNudeWindow ? ' selected' : ''}
+              >a time range only</option>
+          </select>
+        </label>
+        <div id="mnudewin" class="hidden toolbar" style="margin-top:.35rem">
+          <input id="mnudestart" placeholder="from (mm:ss)" style="max-width:11rem"
+            value="${pfNudeWindow && pf.nudity_start != null ? tc(pf.nudity_start) : ''}">
+          <input id="mnudeend" placeholder="to (mm:ss, blank = end)"
+            style="max-width:13rem"
+            value="${pf.nudity_end != null ? tc(pf.nudity_end) : ''}">
+        </div>
+        <p class="muted" style="margin:.3rem 0 0">Detection is the slowest part of a run.
+          Scanning one range is much faster when you already know roughly where the scene
+          is — anything outside it is left untouched.</p>
+      </div>
       <label class="row">
         <span>Whisper model</span>
         <select id="mmodel">
-          <option value="small.en">small.en — fast, verified</option>
-          <option value="medium.en">medium.en — slower, may catch more</option>
-          <option value="base.en">base.en — fastest, least accurate</option>
+          <option value="small.en"${pf.model === 'small.en' ? ' selected' : ''}
+            >small.en — fast, verified</option>
+          <option value="medium.en"${pf.model === 'medium.en' ? ' selected' : ''}
+            >medium.en — slower, may catch more</option>
+          <option value="base.en"${pf.model === 'base.en' ? ' selected' : ''}
+            >base.en — fastest, least accurate</option>
         </select>
       </label>
     </fieldset>
@@ -582,13 +663,32 @@ async function openFilter(path) {
       </div>
       <div id="manlist"></div>
     </fieldset>
+    <fieldset><legend>Output paths</legend>
+      <p class="muted">Leave blank for the defaults. The archive is written first and a
+        run refuses to proceed without it — point it somewhere writable if your media
+        share is read-only.</p>
+      <label class="row"><span style="min-width:5.5rem">Filtered</span>
+        <input id="mout" style="flex:1 1 24rem" spellcheck="false"
+          value="${esc(pf.output_path || '')}" placeholder="…FILTERED.mkv beside the source"></label>
+      <label class="row"><span style="min-width:5.5rem">Archive</span>
+        <input id="march" style="flex:1 1 24rem" spellcheck="false"
+          value="${esc(pf.archive_path || '')}" placeholder="from the Settings template"></label>
+    </fieldset>
     <div class="toolbar">
       <button id="mgo">Queue filter run</button>
       <span id="mmsg" class="muted"></span>
     </div>`;
 
   /* --- manual entry list ------------------------------------------------- */
-  const manual = [];
+  // Rehydrate a reopened run's manual entries. The wire format splits them into
+  // manual_mutes/manual_cuts; the UI keeps one list tagged by kind.
+  const manual = [
+    ...(pf.manual_mutes || []).map((m) => (m.word != null && m.at != null
+      ? { kind: 'word', word: m.word, at: m.at }
+      : { kind: 'range', start: m.start, end: m.end })),
+    ...(pf.manual_cuts || []).map((m) => (
+      { kind: 'cut', start: m.start, end: m.end, snap: m.snap !== false })),
+  ];
   const parseTime = (v) => {
     const s = String(v).trim();
     if (!s) return null;
@@ -625,6 +725,21 @@ async function openFilter(path) {
   };
   $('#mankind').addEventListener('change', syncManualFields);
   syncManualFields();
+
+  // Nudity scope: the window inputs only mean anything when detection is on, so they
+  // stay hidden until it is, and collapse again when it is switched off.
+  const syncNudity = () => {
+    const on = $('#mnude').checked;
+    $('#mnudeopts').classList.toggle('hidden', !on);
+    $('#mnudewin').classList.toggle('hidden',
+      !on || $('#mnudescope').value !== 'window');
+  };
+  $('#mnude').addEventListener('change', syncNudity);
+  $('#mnudescope').addEventListener('change', syncNudity);
+  syncNudity();
+  // Show any entries restored from a reopened run — renderManual() is otherwise only
+  // called from the add/remove handlers, so a prefilled list would stay invisible.
+  if (manual.length) renderManual();
 
   $('#manadd').addEventListener('click', () => {
     const kind = $('#mankind').value;
@@ -672,7 +787,9 @@ async function openFilter(path) {
             <label class="row incident-row">
               <input type="checkbox" class="incbox" data-group="${gi}"
                      data-ref="${esc(i.ref_id)}" data-key="${esc(g.key)}"
-                     data-kind="${i.kind === 'audiovisual' ? 'video' : 'audio'}">
+                     data-kind="${i.kind === 'audiovisual' ? 'video' : 'audio'}"
+                     ${pfRefs.has(String(i.ref_id))
+                       || (!pfRefs.size && pfCats.has(g.key)) ? 'checked' : ''}>
               <span class="tcell">${tc(i.start)}${i.end > i.start
                 ? `–${tc(i.end)}` : ''}</span>
               <span>${esc(i.description)}
@@ -688,13 +805,24 @@ async function openFilter(path) {
       $$(`.incbox[data-group="${cb.dataset.group}"]`)
         .forEach((i) => { i.checked = cb.checked; });
     }));
-    $$('.incbox').forEach((ib) => ib.addEventListener('change', () => {
-      const peers = $$(`.incbox[data-group="${ib.dataset.group}"]`);
-      const cb = $(`.catbox[data-group="${ib.dataset.group}"]`);
-      if (!cb) return;
+    const syncCat = (group) => {
+      const peers = $$(`.incbox[data-group="${group}"]`);
+      const cb = $(`.catbox[data-group="${group}"]`);
+      if (!cb || !peers.length) return;
       cb.checked = peers.every((p) => p.checked);
       cb.indeterminate = !cb.checked && peers.some((p) => p.checked);
-    }));
+    };
+    $$('.incbox').forEach((ib) =>
+      ib.addEventListener('change', () => syncCat(ib.dataset.group)));
+
+    // Reflect any restored selection, and open the groups holding it so a reopened
+    // run shows what it picked instead of hiding it behind a collapsed summary.
+    $$('.catbox').forEach((cb) => {
+      syncCat(cb.dataset.group);
+      if (cb.checked || cb.indeterminate) {
+        cb.closest('.catgroup')?.setAttribute('open', '');
+      }
+    });
   };
 
   // Saved skip files, offered as an alternative source to a VidAngel tag-set. Loaded
@@ -703,7 +831,8 @@ async function openFilter(path) {
     const sel = $('#mvsk');
     if (!sel) return;
     sel.innerHTML = '<option value="">none</option>' + d.skipfiles.map((s) =>
-      `<option value="${s.id}">#${s.id} ${esc(s.title_hint || s.format)}
+      `<option value="${s.id}"${s.id === pf.videoskip_id ? ' selected' : ''}
+        >#${s.id} ${esc(s.title_hint || s.format)}
         — ${s.audio_count} audio, ${s.video_count} video</option>`).join('');
   }).catch(() => { /* leave the "none" option in place */ });
 
@@ -713,6 +842,30 @@ async function openFilter(path) {
   await loadGroups($('#mts').value);
 
   $('#mgo').addEventListener('click', async (e) => {
+    // Resolve the nudity window before disabling the button, so a bad time leaves the
+    // form usable instead of stranding it mid-submit.
+    let nudeStart = null;
+    let nudeEnd = null;
+    if ($('#mnude').checked && $('#mnudescope').value === 'window') {
+      const raw = $('#mnudestart').value.trim();
+      nudeStart = raw ? parseTime(raw) : 0;
+      if (nudeStart == null) {
+        toast('Enter the scan start as mm:ss or seconds.', 'warn');
+        return;
+      }
+      const rawEnd = $('#mnudeend').value.trim();
+      if (rawEnd) {
+        nudeEnd = parseTime(rawEnd);
+        if (nudeEnd == null) {
+          toast('Enter the scan end as mm:ss or seconds, or leave it blank.', 'warn');
+          return;
+        }
+        if (nudeEnd <= nudeStart) {
+          toast('The scan range must end after it starts.', 'warn');
+          return;
+        }
+      }
+    }
     e.target.disabled = true;
     // Send individual refs, so picking 2 of 6 scenes in a category means exactly those
     // two. Category keys still go along for the report and for the audio path's word
@@ -738,7 +891,13 @@ async function openFilter(path) {
         quality: $('input[name=q]:checked').value,
         do_scan: $('#mscan').checked,
         only_enabled: $('#monlyen').checked,
+        detect_nudity: $('#mnude').checked,
+        nudity_start: nudeStart,
+        nudity_end: nudeEnd,
         model: $('#mmodel').value,
+        // Blank means "use the default", so send null rather than an empty string.
+        output_path: $('#mout').value.trim() || null,
+        archive_path: $('#march').value.trim() || null,
         manual_mutes: manual.filter((m) => m.kind !== 'cut').map((m) =>
           m.kind === 'word'
             ? { word: m.word, at: m.at }
@@ -770,11 +929,16 @@ async function loadRuns() {
       <td><button class="secondary rundet" data-id="${r.id}">Details</button>
         ${r.status === 'queued'
           ? `<button class="secondary runcancel" data-id="${r.id}">Cancel</button>` : ''}
+        ${['done', 'failed', 'cancelled'].includes(r.status)
+          ? `<button class="secondary runedit" data-id="${r.id}"
+               title="Reopen these settings to adjust and re-run">Edit &amp; re-run</button>`
+          : ''}
       </td>
     </tr>`;
   }).join('') || '<tr><td colspan="6" class="muted">No runs yet.</td></tr>';
 
   $$('.rundet').forEach((b) => b.addEventListener('click', () => showRun(b.dataset.id)));
+  $$('.runedit').forEach((b) => b.addEventListener('click', () => editRun(b.dataset.id)));
   // Only queued runs can be cancelled — a running job is mid-write in ffmpeg/Whisper.
   $$('.runcancel').forEach((b) => b.addEventListener('click', async () => {
     try {
@@ -793,7 +957,14 @@ async function showRun(id) {
   modal.classList.remove('hidden');
   $('#mtitle').textContent = `Run #${r.id} — ${r.status}`;
   $('#mbody').innerHTML = `
-    ${r.error ? `<pre class="log">${esc(r.error)}</pre>` : ''}
+    ${r.error ? `<fieldset><legend>Failure</legend>
+      <pre class="log">${esc(r.error)}</pre>
+      <div class="toolbar"><button id="editrun" data-id="${r.id}">Edit settings
+        &amp; re-run</button>
+        <span class="muted">Re-running unchanged will fail the same way.</span></div>
+      </fieldset>` : `<div class="toolbar" style="margin-bottom:.8rem">
+        <button class="secondary" id="editrun" data-id="${r.id}">Edit settings
+          &amp; re-run</button></div>`}
     ${inc.length ? `<fieldset><legend>Incidents</legend>
       <table><thead><tr><th>Word</th><th>Bucket</th><th>Mute</th><th>Drift</th>
       <th>Status</th><th>Note</th></tr></thead><tbody>
@@ -832,6 +1003,8 @@ async function showRun(id) {
     ${rep.render ? `<fieldset><legend>Render</legend>
       <div>${esc(rep.render.summary || '')}</div></fieldset>` : ''}
     <fieldset><legend>Log</legend><pre class="log">${esc(r.log || '')}</pre></fieldset>`;
+
+  $('#editrun')?.addEventListener('click', (e) => editRun(e.target.dataset.id));
 
   $$('.dec').forEach((b) => b.addEventListener('click', async () => {
     await postJSON('/api/review', {

@@ -325,6 +325,58 @@ def _pixelate(roi, strength: float):
     return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
 
 
+def _covered(box: Box, planned: list[Box], threshold: float = 0.85) -> bool:
+    """True if `box` is essentially inside an already-blurred region.
+
+    Used to tell a genuine leak apart from the detector recognising body *shape* through
+    the mosaic. The latter is expected and unfixable — pixelation removes detail, not
+    silhouette — so only uncovered detections count as failures.
+    """
+    for p in planned:
+        ix = max(0, min(box.x + box.w, p.x + p.w) - max(box.x, p.x))
+        iy = max(0, min(box.y + box.h, p.y + p.h) - max(box.y, p.y))
+        if (ix * iy) / max(1, box.w * box.h) >= threshold:
+            return True
+    return False
+
+
+def detect_union(
+    video: str,
+    passes: int = 2,
+    classes: tuple[str, ...] = DEFAULT_CLASSES,
+    min_score: float = MIN_SCORE,
+    detect_width: int = 640,
+    progress=None,
+) -> tuple[list[FrameDetections], int, int, float]:
+    """Run detection several times and union the boxes per frame.
+
+    The ONNX model is not bit-stable across runs at the margins: a region scoring 0.64 in
+    one pass can fall below threshold in another, so a single pass leaves real gaps that
+    only show up when the *output* is re-scanned. Unioning independent passes recovers
+    those without having to drop `min_score` globally, which adds false positives
+    everywhere else instead.
+
+    Detection at two scales also helps — a second `detect_width` changes the letterboxing
+    and shakes out different marginal boxes.
+    """
+    widths = [detect_width, int(detect_width * 1.5)]
+    merged: list[FrameDetections] | None = None
+    w = h = 0
+    fps = 0.0
+
+    for i in range(passes):
+        frames, w, h, fps = detect_all_frames(
+            video, classes=classes, min_score=min_score,
+            detect_width=widths[i % len(widths)], progress=progress,
+        )
+        if merged is None:
+            merged = frames
+        else:
+            for a, b in zip(merged, frames):
+                a.boxes.extend(b.boxes)
+    return merged or [], w, h, fps
+
+
 def blur_video(
     video: str,
     dest: str,
@@ -336,22 +388,52 @@ def blur_video(
     strength: float = 0.25,
     pixelate: bool = True,
     detect_width: int = 640,
+    passes: int = 2,
+    repair: int = 1,
     progress=None,
 ) -> dict:
     """Detect nudity across `video` and write a copy with those regions blurred.
 
-    Returns a summary dict: frame counts, per-class totals, and the blurred time ranges.
+    Runs `passes` detection passes over the source, renders, then re-scans the *output*
+    and folds any uncovered leak back into the plan for up to `repair` extra renders.
+    Verifying the artefact rather than trusting the plan is the same discipline the audio
+    pipeline uses, and here it is load-bearing: a single pass demonstrably leaves regions
+    that the model itself flags at high confidence on the result.
+
+    Returns a summary dict: frame counts, per-class totals, blurred ranges, and the
+    per-round leak counts so a caller can see whether it converged.
     """
-    frames, w, h, fps = detect_all_frames(
-        video, classes=classes, min_score=min_score,
+    frames, w, h, fps = detect_union(
+        video, passes=passes, classes=classes, min_score=min_score,
         detect_width=detect_width, progress=progress,
     )
     raw_hits = sum(1 for f in frames if f.boxes)
-    held = smooth(frames, hold=hold, dilate=dilate, max_w=w, max_h=h)
-    planned = plan_blur(held, lead=lead)
+    planned = plan_blur(smooth(frames, hold=hold, dilate=dilate, max_w=w, max_h=h),
+                        lead=lead)
 
     render_blurred(video, planned, dest, fps=fps, width=w, height=h,
                    strength=strength, pixelate=pixelate)
+
+    leak_rounds: list[int] = []
+    for _ in range(repair):
+        out_frames, _, _, _ = detect_all_frames(
+            dest, classes=classes, min_score=min_score, detect_width=detect_width,
+        )
+        leaks = 0
+        for f in out_frames:
+            if f.index >= len(frames):
+                continue
+            for b in f.boxes:
+                if not _covered(b, planned[f.index]):
+                    frames[f.index].boxes.append(b)
+                    leaks += 1
+        leak_rounds.append(leaks)
+        if not leaks:
+            break
+        planned = plan_blur(smooth(frames, hold=hold, dilate=dilate, max_w=w, max_h=h),
+                            lead=lead)
+        render_blurred(video, planned, dest, fps=fps, width=w, height=h,
+                       strength=strength, pixelate=pixelate)
 
     from collections import Counter
 
@@ -361,6 +443,7 @@ def blur_video(
         "frames_detected": raw_hits,
         "frames_blurred": sum(1 for b in planned if b),
         "per_class": dict(per_class),
+        "leaks_repaired": leak_rounds,
         "ranges": _runs_to_ranges(planned, fps),
         "fps": fps,
         "size": [w, h],
