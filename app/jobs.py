@@ -208,6 +208,17 @@ def _execute(run_id: int) -> None:
     audio_refs = set(opts.get("audio_refs") or [])
     if ts:
         pool = ts.enabled() if opts.get("only_enabled") else ts.incidents
+        # "Only tags enabled in VidAngel" combined with a category selection is almost
+        # always a mistake: a tag-set typically has a handful of enabled tags, so
+        # intersecting the two silently yields nothing. Warn and use the full set rather
+        # than run a long job that can only produce zero mutes.
+        if (opts.get("only_enabled") and categories
+                and not any(i.category_key in categories for i in pool)):
+            _log(run_id, f"WARNING 'only tags enabled in VidAngel' left {len(pool)} tag(s), "
+                         f"none in {categories}; using all {len(ts.incidents)} incidents "
+                         f"instead")
+            pool = ts.incidents
+
         by_ref = [i for i in pool if i.ref_id in audio_refs and i.kind == "audio"]
         by_cat = [i for i in pool if i.category_key in categories]
 
@@ -462,8 +473,23 @@ def _execute(run_id: int) -> None:
     # ---- video ranges -----------------------------------------------------------
     video_ranges: list[dict] = []
     manual_cuts = opts.get("manual_cuts") or []
-    want_tagged_video = bool(
-        ts and (opts.get("video_categories") or opts.get("video_refs")))
+    # Only true if something will actually resolve to a cut. Checking the *presence* of
+    # video_refs was not enough: refs from a different tag-set match nothing, and the run
+    # still paid for a full-decode scene-detection pass to place zero cuts — 25 minutes
+    # of CPU on an 87-minute film for no output.
+    want_tagged_video = False
+    if ts:
+        _vcats = set(opts.get("video_categories") or ())
+        _vrefs = set(opts.get("video_refs") or [])
+        want_tagged_video = any(
+            i.kind == "audiovisual" and not i.is_structural
+            and (i.ref_id in _vrefs
+                 or i.category_key in _vcats or i.category_title in _vcats)
+            for i in ts.incidents
+        )
+        if (_vcats or _vrefs) and not want_tagged_video:
+            _log(run_id, "no video incidents matched the selection; skipping scene "
+                         "detection")
 
     # NudeNet discovery. Advisory like the word scan: a classifier has no notion of
     # narrative context, so detections are surfaced for a decision rather than cut
@@ -550,7 +576,22 @@ def _execute(run_id: int) -> None:
         cuts: list[float] = []
         if need_cuts:
             _stage(run_id, "detecting scene cuts", 70)
-            cuts = detect_cuts(path)
+
+            # Report progress through the pass. It is one full decode of the file and
+            # emits nothing until finished — on an 87-minute film that is ~25 minutes of
+            # silence, which is indistinguishable from a hang in the live view.
+            last_beat = [0.0]
+
+            def _cut_progress(at: float, found: int) -> None:
+                if at - last_beat[0] < 30.0:
+                    return
+                last_beat[0] = at
+                pct = (at / duration * 100.0) if duration else 0.0
+                _stage(run_id,
+                       f"detecting scene cuts — {pct:.0f}% of the file, {found} found",
+                       70)
+
+            cuts = detect_cuts(path, progress=_cut_progress)
             _log(run_id, f"{len(cuts)} scene cuts detected")
 
         vr = []

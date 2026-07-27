@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from align import _tool
 
 
-def detect_cuts(video: str, threshold: float = 0.35, scale: int = 320) -> list[float]:
+def detect_cuts(video: str, threshold: float = 0.35, scale: int = 320,
+                progress=None) -> list[float]:
     """Timestamps of detected scene changes, ascending.
 
     One pass over the video, no GPU. `threshold` is ffmpeg's `scene` score: lower finds
@@ -35,29 +36,42 @@ def detect_cuts(video: str, threshold: float = 0.35, scale: int = 320) -> list[f
 
     Downscaling to `scale` px wide first makes this several times faster with no
     meaningful loss in cut detection, which only needs gross frame differences.
+
+    `progress(seconds, cuts_found)` is called as detection advances. Output is streamed
+    rather than collected at the end because this pass is silent for minutes on a feature
+    — 25 minutes of CPU on an 87-minute film — and a caller with no progress signal cannot
+    tell it apart from a hang.
     """
     vf = f"scale={scale}:-2,select='gt(scene,{threshold})',showinfo"
-    proc = subprocess.run(
+    proc = subprocess.Popen(
         [_tool("ffmpeg"), "-v", "info", "-nostats", "-i", video,
          "-an", "-sn", "-vf", vf, "-f", "null", os.devnull],
-        capture_output=True, text=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        errors="replace", bufsize=1,
     )
 
     cuts: list[float] = []
-    for line in proc.stderr.splitlines():
+    assert proc.stderr is not None
+    for line in proc.stderr:
         if "pts_time:" not in line:
             continue
         tail = line.split("pts_time:", 1)[1]
         token = tail.split()[0].rstrip(",")
         try:
             cuts.append(float(token))
+            if progress:
+                progress(cuts[-1], len(cuts))
         except ValueError:
             continue
 
+    # stderr has been consumed by the loop above, so wait for the exit code rather than
+    # trying to read it again. ffmpeg exits 255 at end-of-stream on this filter graph even
+    # on success, so only other non-zero codes are real failures.
+    proc.wait()
     if not cuts and proc.returncode not in (0, 255):
         raise RuntimeError(
-            f"scene detection failed (rc={proc.returncode}): "
-            f"{proc.stderr.strip().splitlines()[-1] if proc.stderr.strip() else 'no output'}"
+            f"scene detection failed (rc={proc.returncode}) — check that the file is "
+            f"readable and is a video: {video}"
         )
     return sorted(cuts)
 
