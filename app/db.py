@@ -76,6 +76,19 @@ CREATE TABLE IF NOT EXISTS settings (
 
 -- Cached VidAngel payloads. Claude/the server cannot reach the API, so these are
 -- uploaded by the user and reused.
+-- VideoSkip Exchange / EDL filter files, pasted or downloaded. Second-choice source when
+-- VidAngel has no tag-set for a title.
+CREATE TABLE IF NOT EXISTS skipfiles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title_hint  TEXT,
+    source      TEXT,               -- url or 'pasted'
+    format      TEXT,               -- vsk | edl | json
+    audio_count INTEGER,
+    video_count INTEGER,
+    payload     TEXT NOT NULL,
+    added_at    TEXT
+);
+
 CREATE TABLE IF NOT EXISTS tagsets (
     tag_set_id  INTEGER PRIMARY KEY,
     work_id     INTEGER,

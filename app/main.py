@@ -245,6 +245,124 @@ def api_va_fetch(body: FetchIn):
             "runtime": ts.runtime_unaltered, "fetched_id": tag_set_id}
 
 
+class SkipFileIn(BaseModel):
+    payload: str | None = None
+    url: str | None = None
+    title_hint: str | None = None
+    token: str | None = None
+
+
+@app.post("/api/skipfiles")
+def api_add_skipfile(body: SkipFileIn):
+    """Store a VideoSkip/EDL/JSON filter file, pasted or fetched by URL.
+
+    Pasting always works. Fetching needs outbound access and is unverified against the
+    live Exchange, so it reports exactly what failed rather than a generic error.
+    """
+    import videoskip_client as vsc
+
+    text, source = body.payload, "pasted"
+    if not text:
+        if not body.url:
+            raise HTTPException(400, "provide either payload or url")
+        try:
+            text = vsc.fetch(body.url, body.token)
+            source = body.url
+        except vsc.FetchError as exc:
+            raise HTTPException(502, str(exc))
+
+    try:
+        sk = vsc.parse_any(text)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not sk.entries:
+        raise HTTPException(400, "parsed the file but found no usable entries")
+
+    fmt = ("json" if text.strip()[:1] in "{[" else
+           "vsk" if "-->" in text else "edl")
+    with db.tx() as c:
+        cur = c.execute(
+            """INSERT INTO skipfiles(title_hint, source, format, audio_count,
+                                     video_count, payload, added_at)
+               VALUES (?,?,?,?,?,?,datetime('now'))""",
+            (body.title_hint or sk.title or None, source, fmt,
+             len(sk.audio()), len(sk.video()), text),
+        )
+        new_id = cur.lastrowid
+    return {"id": new_id, "format": fmt, "title": sk.title,
+            "audio": len(sk.audio()), "video": len(sk.video()),
+            "entries": len(sk.entries)}
+
+
+@app.get("/api/skipfiles")
+def api_list_skipfiles():
+    rows = db.connect().execute(
+        "SELECT id,title_hint,source,format,audio_count,video_count,added_at "
+        "FROM skipfiles ORDER BY id DESC"
+    ).fetchall()
+    return {"skipfiles": [dict(r) for r in rows]}
+
+
+@app.get("/api/skipfiles/{sid}")
+def api_skipfile(sid: int):
+    import videoskip_client as vsc
+
+    row = db.connect().execute(
+        "SELECT * FROM skipfiles WHERE id=?", (sid,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown filter file")
+    sk = vsc.parse_any(row["payload"])
+    return {
+        "id": sid, "title_hint": row["title_hint"], "format": row["format"],
+        "entries": [
+            {"start": e.start, "end": e.end, "category": e.category,
+             "description": e.description, "kind": e.kind,
+             "duration": round(e.duration, 3)}
+            for e in sk.entries
+        ],
+    }
+
+
+@app.delete("/api/skipfiles/{sid}")
+def api_del_skipfile(sid: int):
+    with db.tx() as c:
+        c.execute("DELETE FROM skipfiles WHERE id=?", (sid,))
+    return {"ok": True}
+
+
+@app.get("/api/nudity/classes")
+def api_nudity_classes():
+    """Which NudeNet classes are actionable, and which are deliberately ignored."""
+    import nudity as nud
+
+    return {"actionable": list(nud.DEFAULT_CLASSES),
+            "ignored": list(nud.BENIGN_CLASSES),
+            "min_score": nud.MIN_SCORE}
+
+
+@app.get("/api/frame")
+def api_frame(path: str, at: float):
+    """A single JPEG frame, so a nudity detection can be reviewed visually."""
+    if not library.within_roots(path):
+        raise HTTPException(403, "path is outside the configured library roots")
+    if not os.path.exists(path):
+        raise HTTPException(404, "file not found")
+
+    import subprocess
+    import tempfile
+
+    from align import _tool
+
+    fd, out = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    subprocess.run(
+        [_tool("ffmpeg"), "-v", "error", "-y", "-ss", f"{max(0.0, at):.3f}",
+         "-i", path, "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "5", out],
+        check=True, capture_output=True,
+    )
+    return FileResponse(out, media_type="image/jpeg", filename="frame.jpg")
+
+
 @app.get("/api/tagsets")
 def api_list_tagsets():
     rows = db.connect().execute(
@@ -398,6 +516,12 @@ class RunIn(BaseModel):
     words: list[str] | None = None
     manual_mutes: list[ManualMute] = []
     manual_cuts: list[ManualCut] = []
+    videoskip_id: int | None = None
+    detect_nudity: bool = False
+    nudity_fps: float = 1.0
+    nudity_min_score: float = 0.35
+    nudity_min_hits: int = 2
+    verify_nudity: bool = True
     quality: str = "splice"
     model: str = "small.en"
     do_scan: bool = True
@@ -435,9 +559,11 @@ def api_run(body: RunIn):
         opts["words"] = db.enabled_words()
 
     if not (opts["categories"] or opts["video_categories"] or opts["manual_mutes"]
-            or opts["manual_cuts"] or (opts["do_scan"] and opts["words"])):
+            or opts["manual_cuts"] or opts["videoskip_id"] or opts["detect_nudity"]
+            or (opts["do_scan"] and opts["words"])):
         raise HTTPException(400, "nothing to filter: pick categories, add a manual "
-                                 "mute/cut, or enable the word-list scan")
+                                 "mute/cut, choose a VideoSkip filter, enable nudity "
+                                 "detection, or enable the word-list scan")
 
     # Default output/archive paths: filtered file replaces the library copy, original
     # goes to unfilteredArchive next to the configured toFilter root.

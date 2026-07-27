@@ -255,6 +255,56 @@ def _execute(run_id: int) -> None:
         _log(run_id, f"scan: {len(hits)} hits, {len(covered)} covered, "
                      f"{len(auto)} auto-muted, {len(pending)} awaiting review")
 
+    # ---- VideoSkip filter file --------------------------------------------------
+    # Second-choice source when VidAngel has nothing. Audio entries carry the word in
+    # their description, so they can be located precisely like a tagged incident; video
+    # entries are real ranges (not 6s buckets) and are used as-is.
+    vsk_ranges: list[dict] = []
+    if opts.get("videoskip_id"):
+        import videoskip_client as vsc
+
+        row = conn.execute("SELECT payload FROM skipfiles WHERE id=?",
+                           (opts["videoskip_id"],)).fetchone()
+        if row:
+            sk = vsc.parse_any(row["payload"])
+            _log(run_id, f"VideoSkip filter: {len(sk.audio())} audio, "
+                         f"{len(sk.video())} video entries")
+
+            for n, ent in enumerate(sk.audio()):
+                _stage(run_id, f"videoskip audio {n + 1}/{len(sk.audio())}",
+                       50 + 8 * n / max(1, len(sk.audio())))
+                ref = f"vsk{n}"
+                word = (ent.description or "").strip()
+                if word and " " not in word:
+                    # A named word: locate it, so the Exchange's timing accuracy does
+                    # not limit ours.
+                    mt = locate(path, word, ent.start, ent.end, fps, model=model,
+                                search_pad=3.0)
+                    if mt:
+                        s, e, v, rounds = tighten(path, word, mt.start, mt.end, fps,
+                                                  model=model)
+                        mutes.append((ref, s, e))
+                        results.append({
+                            "ref_id": ref, "word": word, "bucket": ent.start,
+                            "start": round(s, 3), "end": round(e, 3),
+                            "drift": round(s - ent.start, 3),
+                            "confidence": round(mt.confidence, 3), "rounds": rounds,
+                            "status": "OK_VIDEOSKIP" if v.ok else "REVIEW",
+                            "note": v.note})
+                        continue
+                # No word, or not found: honour the file's own timing.
+                s, e = snap_to_frames(max(0.0, ent.start), ent.end, fps)
+                mutes.append((ref, s, e))
+                results.append({
+                    "ref_id": ref, "word": word or ent.category, "bucket": ent.start,
+                    "start": round(s, 3), "end": round(e, 3),
+                    "status": "OK_VIDEOSKIP",
+                    "note": "used file timing (no word to locate)"})
+
+            for ent in sk.video():
+                vsk_ranges.append({"start": ent.start, "end": ent.end,
+                                   "method": f"videoskip:{ent.category}"})
+
     # ---- manual entries ---------------------------------------------------------
     # Hand-specified mutes and cuts, for the cases where VidAngel has nothing and the
     # user knows exactly what they want gone.
@@ -306,12 +356,67 @@ def _execute(run_id: int) -> None:
     manual_cuts = opts.get("manual_cuts") or []
     want_tagged_video = bool(ts and opts.get("video_categories"))
 
-    if want_tagged_video or manual_cuts:
+    # NudeNet discovery. Advisory like the word scan: a classifier has no notion of
+    # narrative context, so detections are surfaced for a decision rather than cut
+    # automatically. Approved ones come back through `decisions` on a re-run.
+    nudity_report: dict = {}
+    nudity_ranges: list[dict] = []
+    if opts.get("detect_nudity"):
+        _stage(run_id, "scanning for nudity", 62)
+        import nudity as nud
+
+        found = nud.scan_video(
+            path,
+            sample_fps=float(opts.get("nudity_fps", 1.0)),
+            min_score=float(opts.get("nudity_min_score", nud.MIN_SCORE)),
+            min_hits=int(opts.get("nudity_min_hits", 2)),
+        )
+        _log(run_id, f"nudity scan: {len(found)} candidate ranges")
+
+        decided = {
+            round(r["at_time"], 1): r["action"]
+            for r in conn.execute(
+                "SELECT at_time, action FROM decisions WHERE path=? AND word='__nudity__'",
+                (path,),
+            ).fetchall()
+        }
+        pending, approved = [], []
+        for r in found:
+            action = decided.get(round(r.start, 1))
+            if action == "mute":            # "mute" means "cut" for a video range
+                approved.append(r)
+            elif action != "skip":
+                pending.append(r)
+
+        nudity_report = {
+            "candidates": len(found),
+            "approved": len(approved),
+            "pending_review": [
+                {"start": round(r.start, 3), "end": round(r.end, 3),
+                 "classes": r.classes,
+                 "peak": (r.peak.cls if r.peak else None),
+                 "score": round(r.peak.score, 2) if r.peak else None,
+                 "hits": len(r.detections)}
+                for r in pending
+            ],
+        }
+        for r in approved:
+            nudity_ranges.append({"start": r.start, "end": r.end,
+                                  "method": "nudity:approved"})
+        if pending:
+            _log(run_id, f"  {len(pending)} nudity ranges awaiting review, "
+                         f"{len(approved)} approved")
+
+    if want_tagged_video or manual_cuts or vsk_ranges or nudity_ranges:
         from scenes import detect_cuts, merge_ranges, snap_range
 
         # Scene detection is one full pass over the video, so only run it if something
         # will actually use it: tagged ranges always snap, manual ranges only on request.
-        need_cuts = want_tagged_video or any(m.get("snap") for m in manual_cuts)
+        # Nudity ranges always snap: detection is sampled (typically 1 fps) so the true
+        # extent is wider than the first and last hit, and cutting to shot boundaries
+        # removes the whole scene rather than a fragment of it.
+        need_cuts = (want_tagged_video or bool(nudity_ranges) or bool(vsk_ranges)
+                     or any(m.get("snap") for m in manual_cuts))
         cuts: list[float] = []
         if need_cuts:
             _stage(run_id, "detecting scene cuts", 70)
@@ -331,6 +436,12 @@ def _execute(run_id: int) -> None:
                     max(inc.end_approx, inc.start_approx + vidangel.BUCKET_SECONDS),
                     cuts, duration=duration,
                 ))
+
+        # VideoSkip video entries and approved nudity ranges: both are real ranges (not
+        # 6s buckets), snapped outward to shot boundaries so a cut never lands mid-shot.
+        for extra in (*vsk_ranges, *nudity_ranges):
+            vr.append(snap_range(extra["start"], extra["end"], cuts,
+                                 duration=duration, pad=1.0))
 
         for m in manual_cuts:
             s, e = float(m["start"]), float(m["end"])
@@ -355,6 +466,7 @@ def _execute(run_id: int) -> None:
         "path": path, "fps": fps, "duration": duration,
         "incidents": results, "mutes": mutes,
         "scan": scan_report, "video_ranges": video_ranges,
+        "nudity": nudity_report,
         "options": opts,
     }
 
@@ -368,6 +480,40 @@ def _execute(run_id: int) -> None:
                                   quality=opts.get("quality", "splice"))
         report["render"] = stats
         _log(run_id, f"rendered {out}: {stats.get('summary','')}")
+
+        # Verify the cuts actually removed what they were meant to. Cutting shifts the
+        # timeline, so the region to re-check is where each removed range *used to be* —
+        # after the cut that is the join point, i.e. the start minus everything removed
+        # before it.
+        if nudity_ranges and opts.get("verify_nudity", True):
+            _stage(run_id, "verifying nudity removed", 95)
+            import nudity as nud
+
+            ordered = sorted(video_ranges, key=lambda c: c["start"])
+            check: list[tuple[float, float]] = []
+            for nr in nudity_ranges:
+                removed_before = sum(
+                    min(c["end"], nr["start"]) - c["start"]
+                    for c in ordered if c["start"] < nr["start"]
+                )
+                joint = max(0.0, nr["start"] - removed_before)
+                # Inspect a couple of seconds either side of the join.
+                check.append((max(0.0, joint - 1.5), joint + 1.5))
+
+            survivors = nud.verify_absent(out, check)
+            report["nudity_verify"] = {
+                "checked_regions": len(check),
+                "survivors": [
+                    {"at": round(s.time, 3), "class": s.cls, "score": round(s.score, 2)}
+                    for s in survivors
+                ],
+                "clean": not survivors,
+            }
+            if survivors:
+                _log(run_id, f"  WARNING: {len(survivors)} nudity detections remain in "
+                             f"the output — review before keeping this file")
+            else:
+                _log(run_id, f"  verified: no nudity detected at {len(check)} cut joins")
 
     _stage(run_id, "done", 100)
     with tx() as c:
