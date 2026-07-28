@@ -97,27 +97,78 @@ def extract_audio(video: str, start: float, end: float, dest: str | None = None)
 
 
 def _register_cuda_dlls() -> None:
-    """Put the pip-installed NVIDIA DLLs on the DLL search path.
+    """Put the pip-installed NVIDIA libraries on the loader's search path.
 
-    `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` drop their DLLs inside site-packages,
-    where Windows won't find them. Without this, the model *loads* on CUDA but dies
-    at inference with "cublas64_12.dll is not found" — so a load-only GPU probe is a
-    false positive.
+    `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` drop their libraries inside
+    site-packages, where the loader won't find them. Without this, the model *loads*
+    on CUDA but dies at inference with "cublas64_12.dll is not found" — so a
+    load-only GPU probe is a false positive.
+
+    The two platforms need different work: Windows keeps DLLs in `bin/` and wants
+    `add_dll_directory`, Linux keeps .so files in `lib/` and reads LD_LIBRARY_PATH.
+    Doing only the Windows half means the container silently runs on CPU.
+
+    LD_LIBRARY_PATH is read by the dynamic linker at process start, so setting it
+    here only helps libraries that have not been loaded yet. The Dockerfile exports
+    it too, which is what actually covers the container.
     """
     import site
 
-    for root in site.getsitepackages():
+    roots = list(site.getsitepackages())
+    if hasattr(site, "getusersitepackages"):
+        roots.append(site.getusersitepackages())
+
+    lib_dirs = []
+    for root in roots:
         nvidia = os.path.join(root, "nvidia")
         if not os.path.isdir(nvidia):
             continue
-        for pkg in os.listdir(nvidia):
-            bin_dir = os.path.join(nvidia, pkg, "bin")
-            if os.path.isdir(bin_dir):
-                try:
-                    os.add_dll_directory(bin_dir)
-                except (OSError, AttributeError):
-                    pass
-                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+        for pkg in sorted(os.listdir(nvidia)):
+            for sub in ("bin", "lib"):
+                d = os.path.join(nvidia, pkg, sub)
+                if os.path.isdir(d):
+                    lib_dirs.append(d)
+
+    for d in lib_dirs:
+        if hasattr(os, "add_dll_directory"):  # Windows only
+            try:
+                os.add_dll_directory(d)
+            except OSError:
+                pass
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+
+    if lib_dirs and not hasattr(os, "add_dll_directory"):
+        prev = os.environ.get("LD_LIBRARY_PATH", "")
+        merged = [d for d in lib_dirs if d not in prev.split(os.pathsep)]
+        if merged:
+            os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(
+                merged + ([prev] if prev else [])
+            )
+
+
+def _cuda_compute_types() -> list[str]:
+    """Compute types to try on the GPU, best first.
+
+    float16 is not universal: Pascal (GTX 1070/1080, compute 6.1) runs it at a
+    fraction of full rate, and int8_float16 needs compute 7.0+. Hardcoding float16
+    is what made those cards fall back to CPU. ctranslate2 knows what the device
+    supports, so ask it and keep only the types it reports, best first.
+    """
+    order = ["float16", "int8_float16", "int8", "int8_float32", "float32"]
+    try:
+        import ctranslate2
+
+        supported = set(ctranslate2.get_supported_compute_types("cuda"))
+        ranked = [c for c in order if c in supported]
+        if ranked:
+            # Pascal reports float16 as supported but runs it at low rate, so prefer
+            # int8 when the fast path is absent.
+            if "int8_float16" not in supported and "int8" in supported:
+                ranked = ["int8"] + [c for c in ranked if c != "int8"]
+            return ranked
+    except Exception:  # noqa: BLE001 - no CUDA, old ctranslate2, etc.
+        pass
+    return order
 
 
 @lru_cache(maxsize=2)
@@ -134,16 +185,22 @@ def get_model(size: str = "small.en", prefer_gpu: bool = True):
     failures only surface once the math kernels are touched.
     """
     if prefer_gpu:
-        try:
-            _register_cuda_dlls()
-            m = _model(size, "cuda", "float16")
-            import numpy as np
+        _register_cuda_dlls()
+        import numpy as np
 
-            list(m.transcribe(np.zeros(16000, dtype=np.float32), beam_size=1)[0])
-            return m
-        except Exception as exc:  # noqa: BLE001 - any CUDA failure means fall back
-            print(f"[align] GPU unavailable ({type(exc).__name__}), using CPU", flush=True)
-            _model.cache_clear()
+        for ct in _cuda_compute_types():
+            try:
+                m = _model(size, "cuda", ct)
+                list(m.transcribe(np.zeros(16000, dtype=np.float32), beam_size=1)[0])
+                print(f"[align] GPU ready (compute_type={ct})", flush=True)
+                return m
+            except Exception as exc:  # noqa: BLE001 - try the next type, then CPU
+                print(
+                    f"[align] compute_type={ct} unusable ({type(exc).__name__}: {exc})",
+                    flush=True,
+                )
+                _model.cache_clear()
+        print("[align] GPU unavailable, using CPU", flush=True)
     return _model(size, "cpu", "int8")
 
 

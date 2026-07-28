@@ -38,6 +38,12 @@ COPY tools/ ./tools/
 COPY app/ ./app/
 
 # Model weights land here; mount it to avoid re-downloading on every container rebuild.
+# cuBLAS/cuDNN ship inside site-packages, which the dynamic linker does not search.
+# align._register_cuda_dlls() also sets this, but LD_LIBRARY_PATH is read at process
+# start — setting it there is too late for libraries loaded during import, so it has
+# to be in the environment as well or CUDA silently falls back to CPU.
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.12/site-packages/nvidia/cublas/lib:/usr/local/lib/python3.12/site-packages/nvidia/cudnn/lib
+
 ENV HF_HOME=/data/models \
     FILTER_DB=/data/filter.db \
     PYTHONUNBUFFERED=1 \
