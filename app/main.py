@@ -953,6 +953,35 @@ def api_run(body: RunIn):
     return {"run_id": run_id}
 
 
+def _legacy_output_path(path: str) -> str:
+    """What `output_path` used to default to, before the filtered file replaced the
+    library copy in place."""
+    stem, ext = os.path.splitext(path)
+    return f"{stem}.FILTERED{ext}"
+
+
+def _without_legacy_output(path: str, opts: dict) -> dict:
+    """Drop a stored `output_path` that was never anything but the old default.
+
+    `api_run` resolves the default and saves the *resolved* path into `options_json`, so
+    every run recorded before the replace-in-place change carries `…FILTERED.mkv` around
+    with it. Replaying those options verbatim — which is what a re-run and a prefilled
+    dialog both do — reproduces exactly the two-files-per-title layout the new default
+    exists to prevent, and it does so silently, because the stored path looks like a
+    deliberate choice. Observed on Severance S01E01: a re-run launched after the fix was
+    deployed still wrote a FILTERED sibling next to the original.
+
+    Only the old default is recognised and cleared. A path the caller actually typed is
+    left alone, even when it happens to end in `.FILTERED.` — a caller asking for a
+    separate file still gets one, they just have to ask again after a re-run.
+    """
+    out = opts.get("output_path")
+    if out and os.path.normpath(out) == os.path.normpath(_legacy_output_path(path)):
+        opts = dict(opts)
+        opts["output_path"] = None
+    return opts
+
+
 @app.get("/api/title/history")
 def api_title_history(path: str):
     """Everything known about past filtering of one title.
@@ -1156,8 +1185,8 @@ def api_run_options(run_id: int):
         "SELECT path, options_json, status FROM runs WHERE id=?", (run_id,)).fetchone()
     if not row:
         raise HTTPException(404, "unknown run")
-    return {"path": row["path"], "status": row["status"],
-            "options": json.loads(row["options_json"] or "{}")}
+    opts = _without_legacy_output(row["path"], json.loads(row["options_json"] or "{}"))
+    return {"path": row["path"], "status": row["status"], "options": opts}
 
 
 @app.post("/api/runs/{run_id}/rerun")
@@ -1170,6 +1199,9 @@ def api_rerun(run_id: int):
 
     The archive is skipped if one already exists — `render()` refuses to overwrite an
     archive, and the first run's copy is still the untouched original.
+
+    A stored output path from before the replace-in-place change is dropped rather than
+    replayed, so the re-run writes over the library copy like a fresh run would.
     """
     row = db.connect().execute(
         "SELECT path, options_json FROM runs WHERE id=?", (run_id,)
@@ -1177,7 +1209,9 @@ def api_rerun(run_id: int):
     if not row:
         raise HTTPException(404, "unknown run")
 
-    opts = json.loads(row["options_json"] or "{}")
+    opts = _without_legacy_output(row["path"], json.loads(row["options_json"] or "{}"))
+    if not opts.get("output_path"):
+        opts["output_path"] = row["path"]
     if not os.path.exists(row["path"]):
         raise HTTPException(
             404, "source file is gone — if it was replaced by the filtered version, "
