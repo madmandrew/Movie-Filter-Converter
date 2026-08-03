@@ -31,11 +31,15 @@ import vidangel_client as vac  # noqa: E402
 async def lifespan(_app: FastAPI):
     """Create the schema and start the job worker before serving any request."""
     db.init()
-    # Clear runs left mid-flight by a previous process before starting the worker,
-    # otherwise they show as active forever and nothing ever picks them up.
-    orphans = jobs.reap_orphans()
-    if orphans:
-        print(f"[startup] marked {orphans} interrupted run(s) as failed", flush=True)
+    # Resolve runs left mid-flight by a previous process before starting the worker:
+    # interrupted ones are failed (nothing resumes them), still-queued ones go back on
+    # the queue. Without this the first group shows as active forever and the second
+    # would be silently discarded.
+    failed, requeued = jobs.reap_orphans()
+    if failed:
+        print(f"[startup] marked {failed} interrupted run(s) as failed", flush=True)
+    if requeued:
+        print(f"[startup] re-queued {requeued} run(s) that had not started", flush=True)
     jobs.ensure_worker()
     yield
 
@@ -122,6 +126,48 @@ def api_library(q: str = "", lib: str | None = None, status: str | None = None,
 @app.post("/api/library/scan")
 def api_scan():
     return library.scan()
+
+
+class MoveIn(BaseModel):
+    old_path: str
+    new_path: str
+
+
+@app.post("/api/library/moved")
+def api_moved(body: MoveIn):
+    """Re-point a title's history after its file was moved.
+
+    The library scan detects unambiguous moves on its own; this covers the rest — a file
+    that was renamed as well as moved, or one of several identical copies, where guessing
+    would risk attaching the history to the wrong title.
+    """
+    old, new = body.old_path, body.new_path
+    if old == new:
+        raise HTTPException(400, "the two paths are the same")
+    if not library.within_roots(new):
+        raise HTTPException(403, "the new path is outside the configured library roots")
+    if not os.path.exists(new):
+        raise HTTPException(404, f"nothing at {new}")
+
+    conn = db.connect()
+    src = conn.execute("SELECT status FROM titles WHERE path=?", (old,)).fetchone()
+    if not src:
+        raise HTTPException(404, f"no title recorded at {old}")
+
+    # Refuse to overwrite a title that has a history of its own — that is a different
+    # title, not this one relocated, and the move would destroy its runs and decisions.
+    dst = conn.execute("SELECT status FROM titles WHERE path=?", (new,)).fetchone()
+    if dst and dst["status"] != "unfiltered":
+        raise HTTPException(
+            409,
+            f"{new} is already a filtered title with its own history; moving onto it "
+            f"would destroy that record")
+
+    moved = db.repath(old, new)
+    # The destination row was created by a scan and carries the file's real name and
+    # library; re-derive them so the title does not keep the old location's labels.
+    library.scan_one(new)
+    return {"ok": True, "moved": moved}
 
 
 @app.get("/api/title")
@@ -815,6 +861,15 @@ class RunIn(BaseModel):
     #: Whisper to find, and as an escape hatch when a word genuinely is not located.
     trust_timestamps: bool = False
     words: list[str] | None = None
+    #: Words to mute on sight, with no review step. Every scan hit for these is muted
+    #: directly rather than joining the pending-review queue — "just filter out any
+    #: 'shit' and 'fuck'" for a title where you already know the answer. Distinct from
+    #: `words` (which decides what is *searched for*) and from the per-title always-mute
+    #: rules (which persist across runs); this applies to this run only.
+    #:
+    #: Empty means review everything, which stays the default: a classifier's opinion is
+    #: not auto-applied unless the user asks for it.
+    auto_mute_words: list[str] = []
     manual_mutes: list[ManualMute] = []
     manual_cuts: list[ManualCut] = []
     videoskip_id: int | None = None
@@ -941,6 +996,7 @@ def api_title_history(path: str):
             "tag_set_id": opts.get("tag_set_id"),
             "videoskip_id": opts.get("videoskip_id"),
             "do_scan": opts.get("do_scan"),
+            "auto_mute_words": opts.get("auto_mute_words"),
             "detect_nudity": opts.get("detect_nudity"),
             "manual_mutes": len(opts.get("manual_mutes") or []),
             "manual_cuts": len(opts.get("manual_cuts") or []),
@@ -952,6 +1008,9 @@ def api_title_history(path: str):
     decisions = db.connect().execute(
         "SELECT at_time, word, action FROM decisions WHERE path=? ORDER BY at_time",
         (path,)).fetchall()
+    word_rules = db.connect().execute(
+        "SELECT word, action FROM word_rules WHERE path=? ORDER BY word",
+        (path,)).fetchall()
 
     return {
         "path": path, "name": row["name"], "status": row["status"],
@@ -961,6 +1020,13 @@ def api_title_history(path: str):
         "archive_exists": bool(archive) and os.path.exists(archive),
         "runs": out_runs,
         "decisions": [dict(d) for d in decisions],
+        "word_rules": [dict(r) for r in word_rules],
+        # A title whose file is gone is either deleted or moved somewhere the scan could
+        # not match unambiguously. Offering the candidates turns "my history vanished"
+        # into one click.
+        "file_exists": os.path.exists(path),
+        "move_candidates": ([] if os.path.exists(path)
+                            else library.move_candidates(path)),
     }
 
 
@@ -1160,13 +1226,85 @@ class DecisionIn(BaseModel):
 def api_decide(body: DecisionIn):
     if body.action not in ("mute", "skip"):
         raise HTTPException(400, "action must be 'mute' or 'skip'")
+    _record([(body.at_time, body.word)], body.path, body.action, body.note)
+    return {"ok": True}
+
+
+class HitRef(BaseModel):
+    at_time: float
+    word: str
+
+
+class BulkDecisionIn(BaseModel):
+    path: str
+    action: str                  # mute | skip
+    hits: list[HitRef]
+    note: str | None = None
+
+
+def _record(hits, path: str, action: str, note: str | None) -> int:
+    """Persist one decision per hit. Shared by the single and bulk endpoints."""
+    with db.tx() as c:
+        for at_time, word in hits:
+            c.execute(
+                "INSERT INTO decisions(path,at_time,word,action,note) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(path,at_time,word) DO UPDATE SET action=excluded.action, "
+                "note=excluded.note",
+                (path, round(at_time, 2), word, action, note),
+            )
+    return len(hits)
+
+
+@app.post("/api/review/bulk")
+def api_decide_bulk(body: BulkDecisionIn):
+    """Decide a whole group of hits at once.
+
+    Backs "mute all 23 f-words" and shift-click range selection. One decision row per
+    hit rather than a rule, so individual hits stay individually revisable afterwards.
+    """
+    if body.action not in ("mute", "skip"):
+        raise HTTPException(400, "action must be 'mute' or 'skip'")
+    n = _record([(h.at_time, h.word) for h in body.hits], body.path, body.action,
+                body.note)
+    return {"ok": True, "count": n}
+
+
+class WordRuleIn(BaseModel):
+    path: str
+    word: str
+    action: str                  # mute | skip
+
+
+@app.post("/api/review/word")
+def api_word_rule(body: WordRuleIn):
+    """Set a blanket rule: every instance of this word in this title, now and later.
+
+    This is the durable form of "select all the F-words". A per-hit decision only covers
+    the timestamps the scan happened to report on that pass; a rule covers the word
+    however its timings move, so a later run never re-asks about it — including for
+    instances no earlier scan had found.
+    """
+    if body.action not in ("mute", "skip"):
+        raise HTTPException(400, "action must be 'mute' or 'skip'")
+    word = db._norm_word(body.word)
+    if not word:
+        raise HTTPException(400, "word is required")
     with db.tx() as c:
         c.execute(
-            "INSERT INTO decisions(path,at_time,word,action,note) VALUES (?,?,?,?,?) "
-            "ON CONFLICT(path,at_time,word) DO UPDATE SET action=excluded.action, "
-            "note=excluded.note",
-            (body.path, round(body.at_time, 2), body.word, body.action, body.note),
+            "INSERT INTO word_rules(path,word,action,created_at) "
+            "VALUES (?,?,?,datetime('now')) "
+            "ON CONFLICT(path,word) DO UPDATE SET action=excluded.action",
+            (body.path, word, body.action),
         )
+    return {"ok": True, "word": word}
+
+
+@app.delete("/api/review/word")
+def api_word_rule_clear(path: str, word: str):
+    """Drop a blanket rule so its word returns to per-instance review."""
+    with db.tx() as c:
+        c.execute("DELETE FROM word_rules WHERE path=? AND word=?",
+                  (path, db._norm_word(word)))
     return {"ok": True}
 
 

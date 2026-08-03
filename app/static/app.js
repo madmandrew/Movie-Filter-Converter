@@ -130,6 +130,29 @@ const tc = (s) => {
   return h ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
 };
 
+/** Escape a value used inside a CSS attribute selector. Words come from a transcript,
+ *  so quotes and backslashes are possible and would break the selector. */
+const cssEsc = (s) => String(s ?? '').replace(/["\\]/g, '\\$&');
+
+/** Group review hits by the word, keeping each group in time order.
+ *
+ *  Reviewing 50 loose hits one at a time is the complaint this answers: grouped, the
+ *  same list is a handful of decisions ("all 23 of these, mute"). `i` is the hit's index
+ *  in the original array, which is how a checkbox maps back to its timestamp.
+ *  Groups are ordered by size so the biggest — the one worth a single bulk click —
+ *  is at the top. */
+function groupHits(hits) {
+  const by = new Map();
+  hits.forEach((h, i) => {
+    const key = String(h.word || '').toLowerCase();
+    if (!by.has(key)) by.set(key, []);
+    by.get(key).push({ ...h, i });
+  });
+  return [...by.entries()]
+    .map(([word, hs]) => ({ word, hits: hs.sort((a, b) => a.at - b.at) }))
+    .sort((a, b) => b.hits.length - a.hits.length || a.word.localeCompare(b.word));
+}
+
 // "yes" is misleading for a windowed run — it reads as "the whole title was checked".
 const nudityScopeLabel = (o) => {
   if (!o || !o.detect_nudity) return 'no';
@@ -268,6 +291,28 @@ async function openHistory(path) {
       ${h.tag_set_id ? `<div style="margin-top:.4rem">Tag-set
         <code>#${h.tag_set_id}</code></div>` : ''}
     </fieldset>
+    ${h.file_exists === false ? `<fieldset><legend>File is missing</legend>
+      <p class="muted">Nothing is at <code>${esc(path)}</code> any more. If you moved it,
+        point this history at its new location — the runs, review decisions and
+        always-mute rules below all follow it.</p>
+      ${(h.move_candidates || []).length ? `
+        <div class="chips">${h.move_candidates.map((c) => `
+          <span class="chip">${esc(c.name)}
+            <span class="muted">${esc(c.library)}${c.same_name ? '' : ' · renamed'}</span>
+            <button class="relink" data-new="${esc(c.path)}"
+              title="${esc(c.path)}">use this</button></span>`).join('')}</div>`
+        : '<p class="muted">No matching file found in the library. If you moved it '
+          + 'outside the configured roots, move it back or add that root in Settings.</p>'}
+      </fieldset>` : ''}
+    ${(h.word_rules || []).length ? `<fieldset><legend>Always-mute words
+      (${h.word_rules.length})</legend>
+      <div class="chips">${h.word_rules.map((w) => `<span class="chip">
+        ${esc(w.word)} <span class="muted">${esc(w.action)} every instance</span>
+        <button class="delrule" data-w="${esc(w.word)}"
+          title="Back to reviewing each one">&times;</button></span>`).join('')}</div>
+      <p class="muted">Applied on every run, including instances a later scan finds for
+        the first time. These never come back for review.</p>
+      </fieldset>` : ''}
     ${h.decisions.length ? `<fieldset><legend>Your review decisions
       (${h.decisions.length})</legend>
       <div class="chips">${h.decisions.map((d) => `<span class="chip">
@@ -300,6 +345,8 @@ async function openHistory(path) {
           <div>Audio quality: <code>${esc(h.runs[0].options.quality || '—')}</code></div>
           <div>Whisper model: <code>${esc(h.runs[0].options.model || '—')}</code></div>
           <div>Word-list scan: <code>${h.runs[0].options.do_scan ? 'yes' : 'no'}</code></div>
+          <div>Muted without review:
+            <code>${esc((h.runs[0].options.auto_mute_words || []).join(', ') || '—')}</code></div>
           <div>Nudity detection:
             <code>${nudityScopeLabel(h.runs[0].options)}</code></div>
         </div>
@@ -327,6 +374,32 @@ async function openHistory(path) {
     b.addEventListener('click', () => showRun(b.dataset.id)));
   $$('.histedit').forEach((b) =>
     b.addEventListener('click', () => editRun(b.dataset.id)));
+
+  $$('.relink').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      await postJSON('/api/library/moved',
+        { old_path: path, new_path: b.dataset.new });
+    } catch (err) {
+      toast(`Could not reconnect: ${err.message}`, 'error');
+      b.disabled = false;
+      return;
+    }
+    toast('History reconnected to the new location', 'ok');
+    closeModal();
+    await loadLibrary();
+  }));
+
+  $$('.delrule').forEach((b) => b.addEventListener('click', async () => {
+    try {
+      await api(`/api/review/word?path=${encodeURIComponent(path)}`
+        + `&word=${encodeURIComponent(b.dataset.w)}`, { method: 'DELETE' });
+    } catch (err) {
+      toast(`Could not remove the rule: ${err.message}`, 'error');
+      return;
+    }
+    openHistory(path);
+  }));
 }
 
 /* --------------------------------------------------- manual VidAngel match picker */
@@ -503,6 +576,12 @@ $('#rescan').addEventListener('click', async (e) => {
     const r = await api('/api/library/scan', { method: 'POST' });
     $('#libstats').textContent = Object.entries(r)
       .filter(([k]) => !k.startsWith('_')).map(([k, v]) => `${k}: ${v}`).join(' · ');
+    // Say so when history was carried across — a silent re-key looks like nothing
+    // happened, and this is the moment to notice it went to the right title.
+    if (r._moved) {
+      toast(`${r._moved} moved file${r._moved === 1 ? '' : 's'} reconnected to `
+        + `${r._moved === 1 ? 'its' : 'their'} filtering history`, 'ok');
+    }
     await loadLibrary();
   } catch (err) {
     toast(`Scan failed: ${err.message}`, 'error');
@@ -553,7 +632,7 @@ async function openFilter(path, prefill = null) {
   const pf = {
     quality: 'splice', model: 'small.en', do_scan: true, only_enabled: false,
     detect_nudity: false, nudity_start: null, nudity_end: null,
-    trust_timestamps: false,
+    trust_timestamps: false, auto_mute_words: [],
     categories: [], video_categories: [],
     audio_refs: [], video_refs: [], manual_mutes: [], manual_cuts: [],
     tag_set_id: null, videoskip_id: null, output_path: null, archive_path: null,
@@ -565,6 +644,9 @@ async function openFilter(path, prefill = null) {
     || pf.nudity_end != null;
   const pfRefs = new Set([...(pf.audio_refs || []), ...(pf.video_refs || [])]);
   const pfCats = new Set([...(pf.categories || []), ...(pf.video_categories || [])]);
+  // Reopening a run must re-tick the per-category "mute all" boxes it was launched with.
+  const pfAuto = new Set((pf.auto_mute_words || [])
+    .map((w) => String(w).trim().toLowerCase()).filter(Boolean));
 
   let groupsHtml = '<p class="muted">No tag-set linked. The word-list scan still runs.</p>';
   let tsSelect = '<option value="">none</option>';
@@ -633,6 +715,16 @@ async function openFilter(path, prefill = null) {
         ${pf.do_scan ? 'checked' : ''}>
         <span>Scan the whole track for word-list matches
           <code>— finds words VidAngel missed; hits await your review</code></span></label>
+      <label class="row" style="align-items:flex-start">
+        <span style="min-width:8.5rem">Mute without review</span>
+        <span style="flex:1">
+          <input type="text" id="mauto" placeholder="shit, fuck"
+            value="${esc((pf.auto_mute_words || []).join(', '))}" style="width:100%">
+          <code>— every match for these words is muted outright, no review queue.
+            Leave empty to review each hit. Inflections are included
+            (“fuck” covers “fucking”). A word you previously chose to skip stays
+            skipped. The “mute all” boxes on the categories above write here.</code>
+        </span></label>
       <label class="row"><input type="checkbox" id="monlyen"
         ${pf.only_enabled ? 'checked' : ''}>
         <span>Only tags already enabled in VidAngel
@@ -801,7 +893,41 @@ async function openFilter(path, prefill = null) {
     // A category checkbox alone hides the fact that "Sexually Suggestive" might be one
     // scene worth cutting and two worth keeping — the descriptions are the only way to
     // tell, and they are the whole reason for choosing per incident.
-    $('#mgroups').innerHTML = ts.groups.map((g, gi) => {
+    // "Mute every instance" strip, one control per distinct word rather than per
+    // category. Categories are the wrong unit for this: VidAngel's "god" category
+    // lists god/goddamn/jesus/christ together, and several categories name the same
+    // word, so a per-category control would both over-reach and double up. The word
+    // is what the scan actually matches on, so it is what the user chooses.
+    //
+    // Only locatable audio categories contribute — a video cut has nothing to hear and
+    // an unlocatable category ("other_sexual") names an action, not a word.
+    const allWords = [...new Set(ts.groups
+      .filter((g) => g.kind !== 'audiovisual' && g.locatable)
+      .flatMap((g) => g.incidents.flatMap((i) => i.words || []))
+      .map((w) => String(w).trim().toLowerCase())
+      .filter(Boolean))].sort();
+    // Count distinct incidents, not mentions: one "goddamn" tag is listed under both the
+    // "damn" and "god" categories, so summing across groups would report it twice and
+    // overstate how much VidAngel already covers.
+    const tagged = (w) => new Set(ts.groups.flatMap((g) => g.incidents
+      .filter((i) => (i.words || []).some((x) => String(x).toLowerCase() === w))
+      .map((i) => i.ref_id))).size;
+    const muteAllHtml = allWords.length ? `
+      <div class="muteall-strip">
+        <div class="muteall-head">Mute every instance, no review
+          <code>— catches what VidAngel did not tag. Inflections included; a hit you
+          previously skipped stays skipped.</code></div>
+        <div class="muteall-words">
+          ${allWords.map((w) => `
+            <label class="muteall" title="Mute every &quot;${esc(w)}&quot; in the episode — VidAngel tagged ${tagged(w)}">
+              <input type="checkbox" class="allbox" data-words="${esc(w)}"
+                     ${pfAuto.has(w) ? 'checked' : ''}>
+              <span>${esc(w)} <code>${tagged(w)}</code></span>
+            </label>`).join('')}
+        </div>
+      </div>` : '';
+
+    $('#mgroups').innerHTML = muteAllHtml + ts.groups.map((g, gi) => {
       const kind = g.kind === 'audiovisual' ? 'video' : 'audio';
       const n = g.incidents.length;
       const note = g.locatable
@@ -857,6 +983,33 @@ async function openFilter(path, prefill = null) {
       if (cb.checked || cb.indeterminate) {
         cb.closest('.catgroup')?.setAttribute('open', '');
       }
+    });
+
+    // "mute all" writes through to the same free-text field the run already reads, so
+    // there is one source of truth at submit time. Ticking the box is a shortcut for
+    // typing the word there — not a second, competing setting that could disagree.
+    const wordsOf = (box) => (box.dataset.words || '').split(',').filter(Boolean);
+    const syncAutoField = () => {
+      const field = $('#mauto');
+      if (!field) return;
+      // Preserve anything typed by hand that no checkbox owns, so toggling a box never
+      // silently deletes a word the user entered themselves.
+      const owned = new Set($$('.allbox').flatMap(wordsOf));
+      const typed = field.value.split(/[,\s]+/).map((w) => w.trim().toLowerCase())
+        .filter((w) => w && !owned.has(w));
+      const ticked = $$('.allbox').filter((b) => b.checked).flatMap(wordsOf);
+      field.value = [...new Set([...typed, ...ticked])].join(', ');
+    };
+    $$('.allbox').forEach((b) => b.addEventListener('change', syncAutoField));
+    // Typing in the field re-ticks any box whose words are all present, keeping the two
+    // views consistent in both directions.
+    $('#mauto')?.addEventListener('input', () => {
+      const typed = new Set($('#mauto').value.split(/[,\s]+/)
+        .map((w) => w.trim().toLowerCase()).filter(Boolean));
+      $$('.allbox').forEach((b) => {
+        const w = wordsOf(b);
+        b.checked = w.length > 0 && w.every((x) => typed.has(x));
+      });
     });
   };
 
@@ -925,6 +1078,10 @@ async function openFilter(path, prefill = null) {
         video_refs: videoRefs,
         quality: $('input[name=q]:checked').value,
         do_scan: $('#mscan').checked,
+        // Free text, so split on commas/whitespace and drop the empties a trailing
+        // comma leaves behind.
+        auto_mute_words: ($('#mauto')?.value || '')
+          .split(/[,\s]+/).map((w) => w.trim().toLowerCase()).filter(Boolean),
         only_enabled: $('#monlyen').checked,
         detect_nudity: $('#mnude').checked,
         trust_timestamps: $('#mtrust').checked,
@@ -1146,19 +1303,42 @@ async function showRun(id) {
         `<div>${tc(v.start)}–${tc(v.end)} <span class="muted">(${(v.end - v.start).toFixed(1)}s, ${esc(v.method)})</span></div>`).join('')}
       </fieldset>` : ''}
     ${pending.length ? `<fieldset><legend>Needs review (${pending.length})</legend>
-      <p class="muted">Words found in the audio that no tag covered. Listen, then choose.</p>
-      <div id="hits">${pending.map((h, k) => `
-        <div class="hit" data-k="${k}">
-          <div class="ctx">${tc(h.at)} — ${esc(h.context).replace(
-            new RegExp(`\\b(${h.word})\\b`, 'i'), '<b>$1</b>')}</div>
-          <div class="actions">
-            <audio controls preload="none"
-              src="/api/clip?path=${encodeURIComponent(r.path)}&start=${h.at}&end=${h.end}"></audio>
-            <button class="dec" data-a="mute" data-t="${h.at}" data-w="${esc(h.word)}">Mute this</button>
-            <button class="dec secondary" data-a="skip" data-t="${h.at}" data-w="${esc(h.word)}">Skip</button>
-            <span class="muted">p=${h.confidence}</span>
+      <p class="muted">Words found in the audio that no tag covered. Listen, then choose.
+        Shift-click a second checkbox to select everything between.</p>
+      ${groupHits(pending).map((g) => `
+        <div class="wordgroup" data-word="${esc(g.word)}">
+          <div class="wordhead">
+            <label><input type="checkbox" class="gall" data-word="${esc(g.word)}">
+              <b>${esc(g.word)}</b> <span class="muted">×${g.hits.length}</span></label>
+            <span class="spacer"></span>
+            <button class="secondary gmute" data-word="${esc(g.word)}">Mute all
+              ${g.hits.length}</button>
+            <button class="secondary gskip" data-word="${esc(g.word)}">Skip all</button>
+            <button class="secondary grule" data-word="${esc(g.word)}"
+              title="Mute every instance of this word in this title, now and on any future run — including ones no scan has found yet">Always mute “${esc(g.word)}”</button>
           </div>
-        </div>`).join('')}</div>
+          <div class="hits">${g.hits.map((h) => `
+            <div class="hit" data-i="${h.i}">
+              <label class="pick"><input type="checkbox" class="hsel" data-i="${h.i}"
+                data-word="${esc(g.word)}"></label>
+              <div class="hbody">
+                <div class="ctx">${tc(h.at)} — ${esc(h.context).replace(
+                  new RegExp(`\\b(${h.word})\\b`, 'i'), '<b>$1</b>')}</div>
+                <div class="actions">
+                  <audio controls preload="none"
+                    src="/api/clip?path=${encodeURIComponent(r.path)}&start=${h.at}&end=${h.end}"></audio>
+                  <button class="dec" data-a="mute" data-t="${h.at}" data-w="${esc(h.word)}">Mute this</button>
+                  <button class="dec secondary" data-a="skip" data-t="${h.at}" data-w="${esc(h.word)}">Skip</button>
+                  <span class="muted">p=${h.confidence}</span>
+                </div>
+              </div>
+            </div>`).join('')}</div>
+        </div>`).join('')}
+      <div class="toolbar" style="margin-top:.6rem">
+        <button class="secondary" id="selmute" disabled>Mute selected
+          (<span id="selcount">0</span>)</button>
+        <button class="secondary" id="selskip" disabled>Skip selected</button>
+      </div>
       <div class="toolbar" style="margin-top:.6rem">
         <button id="rerun">Re-run to apply decisions</button>
         <span class="muted">A mute has to be located and rendered, so applying
@@ -1190,15 +1370,127 @@ async function showRun(id) {
     }
   });
 
+  // Mark a hit as decided: dim it, disable its controls, untick it so it drops out of
+  // the selection count.
+  const settle = (el, action) => {
+    if (!el || el.dataset.done) return;
+    el.dataset.done = action;
+    el.style.opacity = .4;
+    $$('button', el).forEach((x) => { x.disabled = true; });
+    const box = $('.hsel', el);
+    if (box) { box.checked = false; box.disabled = true; }
+  };
+
   $$('.dec').forEach((b) => b.addEventListener('click', async () => {
-    await postJSON('/api/review', {
-      path: r.path, at_time: Number(b.dataset.t), word: b.dataset.w, action: b.dataset.a,
-    });
+    try {
+      await postJSON('/api/review', {
+        path: r.path, at_time: Number(b.dataset.t), word: b.dataset.w,
+        action: b.dataset.a,
+      });
+    } catch (err) {
+      toast(`Could not save: ${err.message}`, 'error');
+      return;
+    }
     const hit = b.closest('.hit');
-    hit.style.opacity = .4;
-    $$('button', hit).forEach((x) => { x.disabled = true; });
     b.textContent = b.dataset.a === 'mute' ? 'will mute' : 'skipped';
+    settle(hit, b.dataset.a);
+    refreshSel();
   }));
+
+  // ---- selection ----------------------------------------------------------
+  // `pending` is the run's own array and its index is the hit id, so a selection maps
+  // straight back to the timestamps the decision rows need.
+  const boxes = () => $$('.hsel').filter((b) => !b.disabled);
+  const selected = () => boxes().filter((b) => b.checked)
+    .map((b) => pending[Number(b.dataset.i)]);
+
+  function refreshSel() {
+    const n = selected().length;
+    $('#selcount').textContent = n;
+    $('#selmute').disabled = !n;
+    $('#selskip').disabled = !n;
+    // Group headers reflect their own children, not the whole list.
+    $$('.gall').forEach((g) => {
+      const kids = $$(`.hsel[data-word="${cssEsc(g.dataset.word)}"]`)
+        .filter((b) => !b.disabled);
+      const on = kids.filter((b) => b.checked).length;
+      g.checked = kids.length > 0 && on === kids.length;
+      g.indeterminate = on > 0 && on < kids.length;
+    });
+  }
+
+  // Shift-click extends from the last clicked box, so a run of adjacent hits — the
+  // "fuck, fuck fuck" case — is three clicks rather than one per word.
+  let anchor = null;
+  $$('.hsel').forEach((b) => b.addEventListener('click', (e) => {
+    const all = boxes();
+    if (e.shiftKey && anchor !== null) {
+      const a = all.indexOf(anchor);
+      const z = all.indexOf(b);
+      if (a > -1 && z > -1) {
+        const [lo, hi] = a < z ? [a, z] : [z, a];
+        for (let k = lo; k <= hi; k++) all[k].checked = b.checked;
+      }
+    }
+    anchor = b;
+    refreshSel();
+  }));
+
+  $$('.gall').forEach((g) => g.addEventListener('change', () => {
+    $$(`.hsel[data-word="${cssEsc(g.dataset.word)}"]`)
+      .filter((b) => !b.disabled)
+      .forEach((b) => { b.checked = g.checked; });
+    refreshSel();
+  }));
+
+  // Bulk-decide a set of hits in one request, then settle their rows.
+  async function decideMany(hits, action) {
+    if (!hits.length) return;
+    try {
+      await postJSON('/api/review/bulk', {
+        path: r.path, action,
+        hits: hits.map((h) => ({ at_time: h.at, word: h.word })),
+      });
+    } catch (err) {
+      toast(`Could not save: ${err.message}`, 'error');
+      return;
+    }
+    hits.forEach((h) => settle($(`.hit[data-i="${h.i}"]`), action));
+    refreshSel();
+    toast(`${action === 'mute' ? 'Muting' : 'Skipping'} ${hits.length} hit${
+      hits.length === 1 ? '' : 's'}`);
+  }
+
+  const groupHitsOf = (w) => $$(`.hsel[data-word="${cssEsc(w)}"]`)
+    .filter((b) => !b.disabled)
+    .map((b) => pending[Number(b.dataset.i)]);
+
+  $$('.gmute').forEach((b) => b.addEventListener('click',
+    () => decideMany(groupHitsOf(b.dataset.word), 'mute')));
+  $$('.gskip').forEach((b) => b.addEventListener('click',
+    () => decideMany(groupHitsOf(b.dataset.word), 'skip')));
+
+  $('#selmute')?.addEventListener('click', () => decideMany(selected(), 'mute'));
+  $('#selskip')?.addEventListener('click', () => decideMany(selected(), 'skip'));
+
+  // A standing rule, as opposed to a decision about the hits on screen: it also covers
+  // instances this scan never found, so the word stops coming back for review at all.
+  $$('.grule').forEach((b) => b.addEventListener('click', async () => {
+    const w = b.dataset.word;
+    try {
+      await postJSON('/api/review/word', { path: r.path, word: w, action: 'mute' });
+    } catch (err) {
+      toast(`Could not save the rule: ${err.message}`, 'error');
+      return;
+    }
+    groupHitsOf(w).forEach((h) => settle($(`.hit[data-i="${h.i}"]`), 'mute'));
+    b.textContent = `always muting “${w}”`;
+    b.disabled = true;
+    refreshSel();
+    toast(`Every “${w}” in this title will be muted from now on`);
+  }));
+
+  refreshSel();
 
   const rerunBtn = $('#rerun');
   if (rerunBtn) {

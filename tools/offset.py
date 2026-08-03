@@ -37,6 +37,25 @@ class OffsetEstimate:
                 f"(spread {self.spread:.2f}s)")
 
 
+#: A cluster this tight is accepted on two tags alone. Rationale, measured on a real
+#: episode (For All Mankind S01E02, run 31): two tags 48 minutes apart, for *different*
+#: words, agreed on -34.98s to within 0.18s. For a coincidental pairing to do that, two
+#: deltas free to fall anywhere in ±`max_offset` must land within 0.18s of each other —
+#: p ≈ 0.0006, i.e. the tight pair is ~1600x likelier to be real than chance. Requiring
+#: a third tag there discarded a correct offset and sent all six incidents into a ±10s
+#: search 35s away from the word, which reported NOT_FOUND for every one of them.
+TIGHT_SPREAD = 0.5
+
+#: Minimum tags in a tight cluster. Two points far apart pin a constant offset; one
+#: cannot be distinguished from a single mistimed tag.
+TIGHT_MIN_SUPPORT = 2
+
+#: How far apart the supporting tags must be before two of them count as proof. Two
+#: hits from the same scene could both be wrong in the same direction; two an episode
+#: apart agreeing to a fraction of a second could not.
+TIGHT_MIN_BASELINE = 60.0
+
+
 def estimate(
     expected: list[tuple[float, str]],
     observed: list[tuple[float, str]],
@@ -53,14 +72,17 @@ def estimate(
     Returns an estimate with `confident=False` rather than guessing when support is thin —
     a wrong offset is far worse than none, since it would move every mute.
     """
-    deltas: list[float] = []
+    # (delta, source time) — the source time is kept so the cluster's baseline can be
+    # measured. Support count alone cannot tell two agreeing points in one scene from
+    # two an episode apart, and only the latter pins a constant offset.
+    deltas: list[tuple[float, float]] = []
     considered = 0
 
     for want_t, word in expected:
         w = (word or "").lower()
         if not w:
             continue
-        cands = [obs_t - want_t for obs_t, obs_w in observed
+        cands = [(obs_t - want_t, want_t) for obs_t, obs_w in observed
                  if obs_w.lower() == w and abs(obs_t - want_t) <= max_offset]
         if cands:
             considered += 1
@@ -71,23 +93,34 @@ def estimate(
 
     # Densest cluster: for each delta, count neighbours within tolerance.
     deltas.sort()
-    best_members: list[float] = []
-    for d in deltas:
-        members = [x for x in deltas if abs(x - d) <= tolerance]
+    best_members: list[tuple[float, float]] = []
+    for d, _t in deltas:
+        members = [(x, t) for x, t in deltas if abs(x - d) <= tolerance]
         if len(members) > len(best_members):
             best_members = members
 
     n = len(best_members)
-    mean = sum(best_members) / n
-    var = sum((x - mean) ** 2 for x in best_members) / n
+    vals = [x for x, _t in best_members]
+    mean = sum(vals) / n
+    var = sum((x - mean) ** 2 for x in vals) / n
     spread = var ** 0.5
 
-    # Require both enough agreement and a majority of tags that had any candidate;
-    # a tight cluster of two proves nothing.
-    confident = n >= min_support and n >= max(1, considered) * 0.5
+    src_times = [t for _x, t in best_members]
+    baseline = max(src_times) - min(src_times)
+
+    # Two independent routes to confidence.
+    #
+    # The original rule — enough tags, and a majority of those that had any candidate.
+    broad = n >= min_support and n >= max(1, considered) * 0.5
+    # Or a cluster so tight, and spanning so much of the runtime, that coincidence is
+    # not a credible explanation. This exists because the broad rule is unreachable on
+    # an episode where most tags name words the transcript never produced: support is
+    # capped by how many tags could vote at all, not by how right the answer is.
+    tight = (n >= TIGHT_MIN_SUPPORT and spread <= TIGHT_SPREAD
+             and baseline >= TIGHT_MIN_BASELINE)
 
     return OffsetEstimate(offset=mean, support=n, considered=considered,
-                          spread=spread, confident=confident)
+                          spread=spread, confident=broad or tight)
 
 
 def apply_offset(times: list[float], offset: float) -> list[float]:

@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
 
-from db import connect, get_setting, tx  # noqa: E402
+from db import connect, get_setting, repath, tx  # noqa: E402
 
 VIDEO_EXTS = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts"}
 
@@ -218,17 +218,93 @@ def scan(progress=None) -> dict:
                     progress(library, n)
         counts[library] = n
 
+    # Reconcile rows against what is actually on disk.
+    #
+    # A moved file looks like a deletion plus an unrelated new file, because every table
+    # keys a title by its absolute path. Detect the move and carry the history across
+    # before deleting anything, otherwise reorganising the library silently strands the
+    # run list, the review decisions and the always-mute rules at a path nothing points
+    # at any more.
+    seen_set = set(seen)
+    moved = _relink_moved(seen_set)
+
     # Drop rows for files that have disappeared, but keep any that were filtered so the
     # history of what we did survives a library reorganisation.
     with tx() as c:
         rows = c.execute(
             "SELECT path FROM titles WHERE status='unfiltered'"
         ).fetchall()
-        gone = [r["path"] for r in rows if r["path"] not in set(seen)]
+        gone = [r["path"] for r in rows if r["path"] not in seen_set]
         for p in gone:
             c.execute("DELETE FROM titles WHERE path=?", (p,))
     counts["_removed"] = len(gone)
+    counts["_moved"] = len(moved)
     return counts
+
+
+def _relink_moved(seen: set[str]) -> list[tuple[str, str]]:
+    """Re-point titles whose file has moved. Returns the (old, new) pairs applied.
+
+    A title is considered moved when a row's path is gone from disk and exactly one
+    newly-seen path has the same filename and byte size. Both halves matter:
+
+    * Name alone is not enough — `S01E01.mkv` occurs in every season directory, and
+      matching on it would hand one episode's history to another.
+    * Requiring a *unique* match is what makes this safe. Duplicate copies of the same
+      file (the same rip in two libraries) produce two candidates, and guessing between
+      them would attach the history to the wrong one. Ambiguous cases are left alone and
+      handled by the manual "this title moved" action instead.
+
+    Only titles with something worth keeping are considered. An unfiltered title has no
+    history, so moving its row and deleting-then-recreating it are indistinguishable.
+    """
+    conn = connect()
+    tracked = conn.execute(
+        "SELECT path, name, size_bytes FROM titles WHERE status != 'unfiltered'"
+    ).fetchall()
+    missing = [r for r in tracked if r["path"] not in seen and not os.path.exists(r["path"])]
+    if not missing:
+        return []
+
+    # Index candidate destinations by identity. Only a path with no history of its own
+    # can receive a move — a filtered title at the new path is a different title that
+    # happens to share a name and size, not the same file relocated.
+    has_history = {
+        r["path"] for r in conn.execute(
+            "SELECT path FROM titles WHERE status != 'unfiltered'").fetchall()
+    }
+    fresh: dict[tuple[str, int], list[str]] = {}
+    for p in seen:
+        if p in has_history:
+            continue
+        try:
+            size = os.path.getsize(p)
+        except OSError:
+            continue
+        fresh.setdefault((os.path.basename(p), size), []).append(p)
+
+    applied: list[tuple[str, str]] = []
+    for r in missing:
+        if r["size_bytes"] is None:
+            continue
+        cands = fresh.get((r["name"], r["size_bytes"]), [])
+        # Exactly one candidate, and it must not already be a tracked title in its own
+        # right (guarded above, but re-checked because one candidate list can serve
+        # several missing rows).
+        if len(cands) != 1:
+            continue
+        new = cands[0]
+        if new == r["path"]:
+            continue
+        repath(r["path"], new)
+        # `repath` replaces the row the scan just created, which is the one that knew
+        # the file's *new* library and name. Re-derive them, or a title moved out of
+        # toFilter keeps claiming to live there.
+        scan_one(new)
+        applied.append((r["path"], new))
+        # Consume the candidate so two missing titles cannot both claim it.
+        fresh[(r["name"], r["size_bytes"])] = []
+    return applied
 
 
 def _upsert(path: str, library: str, name: str, size: int) -> None:
@@ -245,6 +321,79 @@ def _upsert(path: str, library: str, name: str, size: int) -> None:
             """,
             (path, library, name, size, _now()),
         )
+
+
+def move_candidates(old_path: str) -> list[dict]:
+    """Where a missing title's file might have gone.
+
+    The scan re-links only unambiguous moves. This lists the plausible destinations for
+    the rest so the choice can be made by hand: same name and size first (near-certain,
+    just not unique), then same size alone (renamed as well as moved).
+
+    Only paths with no filtering history of their own are offered — a filtered title
+    elsewhere is a different title, and moving onto it would destroy its record.
+    """
+    conn = connect()
+    row = conn.execute(
+        "SELECT name, size_bytes FROM titles WHERE path=?", (old_path,)).fetchone()
+    if row is None or row["size_bytes"] is None:
+        return []
+    size = row["size_bytes"]
+
+    taken = {
+        r["path"] for r in conn.execute(
+            "SELECT path FROM titles WHERE status != 'unfiltered'").fetchall()
+    }
+    out: list[dict] = []
+    for r in conn.execute(
+        "SELECT path, name, library, size_bytes FROM titles WHERE size_bytes=?", (size,)
+    ).fetchall():
+        p = r["path"]
+        if p == old_path or p in taken or not os.path.exists(p):
+            continue
+        out.append({"path": p, "name": r["name"], "library": r["library"],
+                    "same_name": r["name"] == row["name"]})
+    # Exact-name matches are the confident ones; show them first.
+    out.sort(key=lambda x: (not x["same_name"], x["path"]))
+    return out
+
+
+def library_of(path: str) -> str | None:
+    """Which configured root contains `path`, if any."""
+    try:
+        target = os.path.realpath(os.path.abspath(path))
+    except OSError:
+        return None
+    for name, root in roots().items():
+        if not root:
+            continue
+        try:
+            base = os.path.realpath(os.path.abspath(root))
+            if os.path.commonpath([target, base]) == base:
+                return name
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def scan_one(path: str) -> bool:
+    """Refresh one title's row from the file on disk.
+
+    Used after a move: the row carries the history from the old location, so its
+    `library` and `name` still describe where the file used to be. Returns False if the
+    path is not a library candidate.
+    """
+    if not is_candidate(path) or not os.path.exists(path):
+        return False
+    lib = library_of(path)
+    if lib is None:
+        return False
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return False
+    _upsert(path, lib, os.path.basename(path), size)
+    return True
 
 
 def ensure_probed(path: str, force: bool = False) -> dict:

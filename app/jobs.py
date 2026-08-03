@@ -51,28 +51,48 @@ def enqueue(path: str, options: dict) -> int:
     return run_id
 
 
-def reap_orphans() -> int:
-    """Fail runs left 'running' by a previous process.
+def reap_orphans() -> tuple[int, int]:
+    """Deal with runs left mid-flight by a previous process.
 
-    Nothing resumes a job across a restart — the worker is in-process — so a run still
-    marked running at startup is an orphan. Left alone it shows as active forever, which
-    is indistinguishable from a live job and makes the whole idea of "is it stuck?"
-    meaningless.
+    Returns (failed, requeued).
+
+    A *running* run cannot be resumed: the worker is in-process, ffmpeg and Whisper were
+    killed mid-write, and there is no checkpoint to restart from. Left alone it shows as
+    active forever, which is indistinguishable from a live job, so it is failed with an
+    explanation.
+
+    A *queued* run is a different case: it never started, so there is nothing to recover
+    and nothing partially written. Failing it threw away work the user had already asked
+    for and made them rebuild the run by hand. Its options are all in `options_json`,
+    which is exactly what the worker needs, so it is simply put back on the queue.
     """
     # Build the message in Python: adjacent string literals concatenate in Python but are
     # a syntax error inside a SQL statement, and SQLite reports it only at execute time.
     note = ("Interrupted: the server restarted while this run was in progress. Nothing "
             "resumes across a restart — use \"Edit & re-run\" to start it again.")
     with tx() as c:
-        rows = c.execute(
-            "SELECT id FROM runs WHERE status IN ('running','queued')").fetchall()
-        for r in rows:
+        running = c.execute("SELECT id FROM runs WHERE status='running'").fetchall()
+        for r in running:
             c.execute(
                 "UPDATE runs SET status='failed', finished_at=?, "
                 "error = COALESCE(error,'') || ? WHERE id=?",
                 (_now(), note, r["id"]),
             )
-    return len(rows)
+        # Oldest first, so the queue keeps the order the user submitted in.
+        queued = c.execute(
+            "SELECT id FROM runs WHERE status='queued' ORDER BY id").fetchall()
+        for r in queued:
+            c.execute(
+                "UPDATE runs SET stage='waiting', progress=0, heartbeat_at=? WHERE id=?",
+                (_now(), r["id"]),
+            )
+
+    # Re-enqueue outside the transaction: the worker starts consuming as soon as an id
+    # lands on the queue, and it opens its own connection.
+    for r in queued:
+        _Q.put(r["id"])
+
+    return len(running), len(queued)
 
 
 def ensure_worker() -> None:
@@ -276,13 +296,55 @@ def _execute(run_id: int) -> None:
                              f"categories {categories or '(none)'}")
     _log(run_id, f"{len(todo)} tagged audio incidents ({source})")
 
+    # ---- the one full-file transcription ----------------------------------------
+    #
+    # Two stages need a full scan: the offset estimate (which must run BEFORE locating
+    # anything) and the discovery scan (which runs after, and cross-references against
+    # the planned mutes). Both used to call `full_scan` separately, which transcribed the
+    # whole file twice — on a 3.4-hour film that was 55 + 77 minutes, ~2/3 of the run,
+    # for two passes over identical audio.
+    #
+    # Scan cost is dominated by transcription and is independent of the word list: every
+    # chunk is transcribed either way and the words are only a filter on the result. So
+    # one pass over the union of both lists costs no more than either pass alone, and the
+    # hits are just partitioned differently by each consumer.
+    import db as db_mod
+    decided = db_mod.load_decisions(title_path)
+
+    # A word under an always-mute rule must be searched for even if nothing else asked
+    # for it — the point of the rule is to catch instances no earlier pass found.
+    ruled_mute = sorted(decided.muted_words())
+    auto_words = [str(w).strip().lower() for w in (opts.get("auto_mute_words") or [])
+                  if str(w).strip()]
+    tag_words = {w for i in todo for w in i.words}
+    scan_words = sorted(set(words) | tag_words | set(ruled_mute) | set(auto_words))
+
+    want_offset = bool(todo and opts.get("auto_offset", True))
+    want_scan = bool(scan_words and opts.get("do_scan", True))
+
+    hits: list = []
+    scanned = False
+    if want_offset or want_scan:
+        _stage(run_id, f"transcribing full audio for {len(scan_words)} words", 8)
+        _log(run_id, f"full scan: {len(scan_words)} word(s) "
+                     f"[{', '.join(scan_words[:12])}"
+                     f"{'…' if len(scan_words) > 12 else ''}]")
+        hits = full_scan(path, scan_words, model=model, progress=False)
+        scanned = True
+        _log(run_id, f"full scan: {len(hits)} hit(s) in {duration:.0f}s of audio")
+
+    if ruled_mute:
+        _log(run_id, f"always-mute rules: {', '.join(ruled_mute)}")
+    if auto_words:
+        _log(run_id, f"auto-mute for this run (no review): {', '.join(auto_words)}")
+
     # Estimate the source-to-file offset BEFORE locating anything.
     #
     # A filter source is keyed to whatever cut the provider had, and a local rip can
     # differ by seconds to minutes. Rather than widen every search window (cost scales
-    # with window size — a ±60s window is ~24s per incident), derive the offset from a
-    # cheap scan of just the words the tags name, then search normally around corrected
-    # positions. Measured exact to 0.0000s at offsets up to +250s.
+    # with window size — a ±60s window is ~24s per incident), derive the offset from the
+    # scan above, then search normally around corrected positions. Measured exact to
+    # 0.0000s at offsets up to +250s.
     #
     # This is also why picking the "right" streaming offering barely matters: the timeline
     # is measured from the local audio, not trusted from the source.
@@ -293,15 +355,13 @@ def _execute(run_id: int) -> None:
     #: footage — measured on a real run: a -27s mismatch put an 18s cut 4s past the end
     #: of the content it was meant to remove.
     RUNTIME_TOLERANCE = 10.0
-    if todo and opts.get("auto_offset", True):
-        _stage(run_id, "estimating source offset", 8)
+    if want_offset:
+        _stage(run_id, "estimating source offset", 40)
         import offset as off_mod
 
-        probe_words = sorted({w for i in todo for w in i.words})
-        probe_hits = full_scan(path, probe_words, model=model, progress=False)
         est = off_mod.estimate(
             [(i.start_approx, i.words[0]) for i in todo if i.words],
-            [(float(h.start), h.word) for h in probe_hits],
+            [(float(h.start), h.word) for h in hits],
         )
         _log(run_id, f"offset estimate: {est.summary}")
         if est.confident:
@@ -332,8 +392,10 @@ def _execute(run_id: int) -> None:
 
     for n, inc in enumerate(todo):
         label = inc.words[0]
+        # The full scan above is the long pole (most of a run on a feature-length file),
+        # so the locate pass occupies a narrow band after it rather than the first third.
         _stage(run_id, f"locating {label} @{inc.start_approx:.0f}s",
-               10 + 30 * n / max(1, len(todo)))
+               42 + 10 * n / max(1, len(todo)))
 
         if trust_timestamps:
             _use_tag_timing(inc, label, "trusting the tag's timestamps (Whisper skipped)")
@@ -374,55 +436,156 @@ def _execute(run_id: int) -> None:
             "status": "OK" if v.ok else "REVIEW", "note": v.note,
         })
 
-    # ---- full discovery scan ----------------------------------------------------
-    scan_words = sorted(set(words) | {w for i in todo for w in i.words})
+    # ---- discovery, from the scan already performed ------------------------------
     scan_report: dict = {}
-    if scan_words and opts.get("do_scan", True):
-        _stage(run_id, f"scanning full audio for {len(scan_words)} words", 45)
-        hits = full_scan(path, scan_words, model=model, progress=False)
+    if want_scan and scanned:
+        _stage(run_id, "cross-referencing the scan", 55)
 
-        # Recover incidents the targeted pass missed. Whisper's chunking differs between
-        # a narrow per-incident window and the full scan, and decode variance means the
-        # scan sometimes hears a word the targeted search did not. If an uncovered hit
-        # sits near an unresolved bucket, it is almost certainly that incident.
+        # Recover incidents the targeted pass missed. Two separate causes, and the window
+        # has to be wide enough for both:
+        #
+        #  * decode variance — Whisper's chunking differs between a narrow per-incident
+        #    window and a 120s scan chunk, so the scan hears words the targeted search
+        #    did not. Measured on a real run: a 'shit' recovered at 7.25s drift that the
+        #    ±10s targeted search had already failed to find.
+        #  * a tag-set keyed to a different cut — drift then runs to 12s+ and is not
+        #    constant across the film, so no single offset corrects it. These are exactly
+        #    the incidents the offset estimator could not agree on.
+        #
+        # An 8s window only ever caught the first; 30s catches the second.
+        #
+        # A tag is treated as evidence that the word is spoken *near* the bucket, not as
+        # a pointer to one particular utterance. So every uncovered hit for that word
+        # inside the window is muted, not just the nearest one. Two earlier rules each
+        # silently dropped real VidAngel filters:
+        #
+        #  * taking only `min(near, ...)` muted one hit and abandoned the rest. In rapid
+        #    dialogue ("shit, shit") and wherever a bucket sat between two utterances,
+        #    the others were left unmuted and — because the incident was now resolved —
+        #    never looked at again.
+        #  * restricting recovery to NOT_FOUND rows meant an incident whose targeted
+        #    search locked onto the *wrong* instance of the word counted as solved. It
+        #    reported OK while muting the wrong second of audio, and the real utterance
+        #    stayed audible.
+        #
+        # Both are fixed by sweeping every tagged incident, whatever its status, and
+        # muting all uncovered hits in range. Over-muting here costs an extra silenced
+        # instance of a word the tag already asserts is profane; under-muting ships the
+        # profanity. An explicit per-hit "skip" decision still wins — see below.
         from locate import _variants
 
-        RECOVER_WINDOW = 8.0
-        for r in [x for x in results if x["status"] == "NOT_FOUND"]:
-            near = [
-                h for h in hits
-                if h.covered_by is None
-                and h.word in _variants(r["word"])
-                and abs(h.start - (r["bucket"] + tag_offset)) <= RECOVER_WINDOW
-            ]
-            if not near:
-                continue
-            h = min(near, key=lambda x: abs(x.start - (r["bucket"] + tag_offset)))
-            s, e = snap_to_frames(max(0.0, h.start - 0.06), h.end + 0.06, fps)
-            s, e, v, rounds = tighten(path, r["word"], s, e, fps, model=model)
-            mutes.append((r["ref_id"], s, e))
-            r.update(start=round(s, 3), end=round(e, 3),
-                     drift=round(s - (r["bucket"] + tag_offset), 3),
-                     confidence=round(h.confidence, 3), rounds=rounds,
-                     status="OK_VIA_SCAN" if v.ok else "REVIEW", note=v.note)
-            _log(run_id, f"recovered {r['ref_id']} {r['word']} via scan at {s:.3f} "
-                         f"(drift {s - r['bucket']:+.2f}s)")
+        # The window has to clear the drift actually present, and a fixed 30s does not.
+        # Run 31 measured a -34.98s offset, declined to apply it, and then swept ±30s
+        # around uncorrected positions — missing every incident by about 5 seconds. So
+        # when an offset was *measured* but not trusted enough to apply, widen far enough
+        # to reach the position it points at. The match still requires the same word, so
+        # a wider window costs candidate quality, not correctness.
+        RECOVER_WINDOW = 30.0
+        if report_offset and not report_offset.get("confident"):
+            measured = abs(float(report_offset.get("offset") or 0.0))
+            if measured > RECOVER_WINDOW:
+                RECOVER_WINDOW = measured + 15.0
+                _log(run_id, f"widening scan recovery to ±{RECOVER_WINDOW:.0f}s — an "
+                             f"offset of {report_offset['offset']:+.2f}s was measured but "
+                             f"not applied")
+        tagged = [x for x in results if x.get("bucket") is not None
+                  and x.get("ref_id") and not str(x["ref_id"]).startswith(("vsk", "man"))]
+        # Mutes already placed by the targeted pass, so a hit that pass found is not
+        # muted a second time under a new ref_id.
+        planned = [(s, e) for _rid, s, e in mutes]
+
+        def _already_muted(h) -> bool:
+            span = max(1e-6, h.end - h.start)
+            return any(
+                (min(h.end, e) - max(h.start, s)) / span >= 0.5 for s, e in planned
+            )
+
+        recovered = 0
+        for r in tagged:
+            centre = r["bucket"] + tag_offset
+            near = sorted(
+                (h for h in hits
+                 if h.covered_by is None
+                 and h.word in _variants(r["word"])
+                 and abs(h.start - centre) <= RECOVER_WINDOW
+                 and not _already_muted(h)),
+                key=lambda x: x.start,
+            )
+            for h in near:
+                # A word the user explicitly told us to leave alone stays alone. The tag
+                # vouches for the neighbourhood, not for overriding a decision already
+                # made about this exact utterance.
+                if decided.action_for(h.word, h.start) == "skip":
+                    continue
+                s, e = snap_to_frames(max(0.0, h.start - 0.06), h.end + 0.06, fps)
+                s, e, v, rounds = tighten(path, r["word"], s, e, fps, model=model)
+                planned.append((s, e))
+                recovered += 1
+                if r["status"] == "NOT_FOUND":
+                    # The incident had nothing; this hit becomes its answer.
+                    mutes.append((r["ref_id"], s, e))
+                    r.update(start=round(s, 3), end=round(e, 3),
+                             drift=round(s - centre, 3),
+                             confidence=round(h.confidence, 3), rounds=rounds,
+                             status="OK_VIA_SCAN" if v.ok else "REVIEW", note=v.note)
+                    _log(run_id, f"recovered {r['ref_id']} {r['word']} via scan at "
+                                 f"{s:.3f} (drift {s - r['bucket']:+.2f}s)")
+                else:
+                    # The incident already has a mute; this is an *additional* utterance
+                    # near the same tag. It needs its own ref_id — the results table and
+                    # the review decisions are both keyed on it, and reusing the
+                    # incident's id would make two rows collide.
+                    ref = f"{r['ref_id']}+{s:.2f}"
+                    mutes.append((ref, s, e))
+                    results.append({
+                        "ref_id": ref, "word": r["word"], "bucket": r["bucket"],
+                        "start": round(s, 3), "end": round(e, 3),
+                        "drift": round(s - centre, 3),
+                        "confidence": round(h.confidence, 3), "rounds": rounds,
+                        "status": "OK_NEAR_TAG" if v.ok else "REVIEW",
+                        "note": v.note,
+                    })
+                    _log(run_id, f"extra {r['word']} near {r['ref_id']} at {s:.3f} "
+                                 f"(drift {s - r['bucket']:+.2f}s)")
+        if recovered:
+            _log(run_id, f"{recovered} mute(s) recovered from the scan around tagged "
+                         f"incidents (±{RECOVER_WINDOW:.0f}s)")
 
         covered, missed = cross_reference(hits, mutes)
 
         # Honour prior review decisions so a re-run doesn't re-ask.
-        decided = {
-            (round(r["at_time"], 2), r["word"]): r["action"]
-            for r in conn.execute(
-                # Keyed on the title, not the file being read: a re-run reads the archive,
-                # and looking decisions up by that path would silently discard every
-                # review the user had already made.
-                "SELECT at_time, word, action FROM decisions WHERE path=?", (title_path,)
-            ).fetchall()
-        }
+        #
+        # Matching is by tolerance, not by an exact timestamp. Whisper re-decodes the same
+        # audio to slightly different word boundaries every run, so an equality key missed
+        # the decision the user had already made and put the word straight back into the
+        # review queue — the reason the pending count kept growing across passes instead
+        # of draining. `decided` is keyed on the title, not the file being read: a re-run
+        # reads the archive, and looking decisions up by that path would discard every
+        # review the user had already made.
+        # Words this run was told to mute on sight: real inflections only.
+        #
+        # `_variants` also returns the forms Whisper *sanitises* profanity into — "shit"
+        # yields "shoot"/"sheet", "bitch" yields "beach", "fuck" yields "duck". Those are
+        # correct when locating a tagged incident, where the tag already asserts the word
+        # is there and a softened transcript is the expected evidence. They are wrong for
+        # a blanket rule: nothing here asserts the word was profane, so auto-muting them
+        # silences innocent dialogue with no review step to catch it. A hit on a softened
+        # form still reaches the review queue — it is just not muted unattended.
+        from locate import _SOFTENED
+
+        auto_targets: set[str] = set()
+        for w in auto_words:
+            softened = set(_SOFTENED.get(db_mod._norm_word(w), ()))
+            auto_targets |= (_variants(w) - softened)
+
         auto, pending = [], []
         for h in missed:
-            action = decided.get((round(h.start, 2), h.word))
+            action = decided.action_for(h.word, h.start)
+            if action is None and h.word in auto_targets:
+                # An explicit per-hit decision still wins: "skip this one" made in an
+                # earlier review is a more specific instruction than a blanket word list,
+                # and silently overriding it would make review decisions feel unreliable.
+                action = "mute"
             if action == "mute":
                 auto.append(h)
             elif action == "skip":
@@ -430,18 +593,37 @@ def _execute(run_id: int) -> None:
             else:
                 pending.append(h)
 
+        by_rule = 0
+        by_auto = 0
         for h in auto:
             s, e = snap_to_frames(max(0.0, h.start - 0.06), h.end + 0.06, fps)
             s, e, v, _r = tighten(path, h.word, s, e, fps, model=model)
             mutes.append((f"scan@{h.start:.2f}", s, e))
+            # Distinguish "the user ticked this one" from "a standing rule caught it"
+            # from "this run said mute anything matching": the breakdown is what tells
+            # you whether an automatic setting is doing what was intended.
+            rule = decided.rule_for(h.word) == "mute"
+            auto_listed = not rule and decided.action_for(h.word, h.start) is None
+            by_rule += rule
+            by_auto += auto_listed
             results.append({"ref_id": f"scan@{h.start:.2f}", "word": h.word,
                             "bucket": None, "start": round(s, 3), "end": round(e, 3),
-                            "status": "OK_FROM_WORDLIST", "note": v.note})
+                            "status": ("OK_BY_RULE" if rule
+                                       else "OK_AUTO_MUTED" if auto_listed
+                                       else "OK_FROM_WORDLIST"),
+                            "note": v.note})
+        if by_rule:
+            _log(run_id, f"{by_rule} mute(s) applied by always-mute rules")
+        if by_auto:
+            _log(run_id, f"{by_auto} mute(s) auto-applied without review "
+                         f"({', '.join(auto_words)})")
 
         scan_report = {
             "total_hits": len(hits),
             "covered": len(covered),
             "auto_muted": len(auto),
+            "auto_muted_by_rule": by_rule,
+            "auto_muted_by_wordlist": by_auto,
             "pending_review": [
                 {"word": h.word, "at": round(h.start, 3), "end": round(h.end, 3),
                  "confidence": round(h.confidence, 2), "context": h.context}
@@ -601,17 +783,27 @@ def _execute(run_id: int) -> None:
                          f"{f'{n_end:.1f}s' if n_end is not None else 'end'}")
         _log(run_id, f"nudity scan: {len(found)} candidate ranges")
 
-        decided = {
-            round(r["at_time"], 1): r["action"]
+        # Keyed on the title, not the archive a re-run reads from. Matched with a
+        # tolerance for the same reason as the word decisions: a re-run at a different
+        # `nudity_fps` samples different frames, so the reported start of the same scene
+        # moves by up to a sample interval and an exact key would lose the decision.
+        n_decided = [
+            (r["at_time"], r["action"])
             for r in conn.execute(
-                # Keyed on the title, not the archive a re-run reads from.
                 "SELECT at_time, action FROM decisions WHERE path=? AND word='__nudity__'",
                 (title_path,),
             ).fetchall()
-        }
+        ]
+        #: Widened by the sample interval so a decision survives an fps change.
+        n_tol = max(1.0, 2.0 / max(float(opts.get("nudity_fps", 1.0)), 0.1))
+
+        def _nudity_action(at: float) -> str | None:
+            near = [(abs(t - at), a) for t, a in n_decided if abs(t - at) <= n_tol]
+            return min(near)[1] if near else None
+
         pending, approved = [], []
         for r in found:
-            action = decided.get(round(r.start, 1))
+            action = _nudity_action(r.start)
             if action == "mute":            # "mute" means "cut" for a video range
                 approved.append(r)
             elif action != "skip":

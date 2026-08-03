@@ -63,6 +63,11 @@ CREATE TABLE IF NOT EXISTS wordlist (
 
 -- Per-hit review decisions from the interactive scan review, keyed by title + time so
 -- a re-run does not re-ask what the user already judged.
+--
+-- `at_time` is matched with a tolerance, never by equality: Whisper's word timestamps
+-- move a few tens of milliseconds between decodes, so an exact key silently failed to
+-- recognise a hit the user had already judged and re-asked about it every single run.
+-- See `decision_for()`.
 CREATE TABLE IF NOT EXISTS decisions (
     path     TEXT NOT NULL,
     at_time  REAL NOT NULL,
@@ -70,6 +75,19 @@ CREATE TABLE IF NOT EXISTS decisions (
     action   TEXT NOT NULL,             -- mute | skip
     note     TEXT,
     PRIMARY KEY (path, at_time, word)
+);
+
+-- Blanket per-word rules: "mute every instance of this word in this title". A rule
+-- outranks nothing — it is consulted only where no per-hit decision exists — but it
+-- means a word the user has already ruled on never comes back for review, however the
+-- scan's timings shift. This is what makes "select all the F-words" a one-time action
+-- instead of a per-instance chore repeated every pass.
+CREATE TABLE IF NOT EXISTS word_rules (
+    path       TEXT NOT NULL,
+    word       TEXT NOT NULL,           -- normalised stem, matched via _variants()
+    action     TEXT NOT NULL,           -- mute | skip
+    created_at TEXT,
+    PRIMARY KEY (path, word)
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -194,6 +212,148 @@ def set_setting(key: str, value) -> None:
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, json.dumps(value)),
         )
+
+
+#: Every table that keys a title by its absolute path. A file moving on disk must
+#: re-point all of them together or the history silently detaches from the title: the
+#: run list, the review decisions and the always-mute rules would all still exist but
+#: be unreachable from the new path.
+_PATH_KEYED = ("titles", "runs", "decisions", "word_rules", "autofetch")
+
+
+def repath(old: str, new: str) -> dict[str, int]:
+    """Move a title's entire history from `old` to `new`. Returns rows touched per table.
+
+    Used when a file is moved on disk. Everything about a title — its runs, the words the
+    user judged, the always-mute rules — is keyed on the absolute path, so without this a
+    reorganisation looks like the old title vanishing and an unrelated new one appearing.
+
+    A row already existing at `new` (the scan will have inserted a bare `titles` row for
+    the file in its new location) is replaced by the one carrying the history.
+    """
+    if old == new:
+        return {}
+    moved: dict[str, int] = {}
+    with tx() as c:
+        for table in _PATH_KEYED:
+            # Clear the destination first: `titles.path` is a primary key and
+            # `decisions`/`word_rules` have composite keys including it, so an UPDATE
+            # onto an occupied key would fail the whole move. The row being displaced is
+            # the historyless one the scan just created.
+            c.execute(f"DELETE FROM {table} WHERE path=?", (new,))
+            cur = c.execute(f"UPDATE {table} SET path=? WHERE path=?", (new, old))
+            if cur.rowcount:
+                moved[table] = cur.rowcount
+    return moved
+
+
+#: How far a stored decision's timestamp may sit from a scan hit and still be considered
+#: the same word. Whisper re-decodes the same audio to slightly different boundaries run
+#: to run (documented in CLAUDE.md), so matching on equality loses the decision entirely.
+#: 0.5s is comfortably wider than the observed jitter and narrower than the gap between
+#: two distinct utterances of the same word in rapid speech.
+DECISION_TOL = 0.5
+
+
+class Decisions:
+    """Resolved review state for one title: per-hit decisions plus per-word rules.
+
+    Loaded once per run rather than queried per hit — a scan produces hundreds of hits
+    and the decision set is small.
+    """
+
+    def __init__(self, per_hit: list[tuple[float, str, str]],
+                 rules: dict[str, str]) -> None:
+        #: (at_time, word, action), sorted by time so lookup can stop early.
+        self._hits = sorted(per_hit)
+        self._rules = rules
+
+    def rule_for(self, word: str) -> str | None:
+        """The blanket action for `word`, if the user set one.
+
+        A rule is stored against the stem the user reviewed, but the scan reports the
+        inflection it actually heard, so a rule on "fuck" must also answer for "fucking"
+        and "fucks". Matching goes through the same variant expansion the word matcher
+        uses, so the two never disagree about what counts as the same word.
+        """
+        norm = _norm_word(word)
+        if norm in self._rules:
+            return self._rules[norm]
+        for stem, action in self._rules.items():
+            if norm in _word_variants(stem):
+                return action
+        return None
+
+    def muted_words(self) -> set[str]:
+        """Words under a blanket mute rule.
+
+        The scan must look for these even when they are not on the run's word list —
+        a rule is meant to catch instances no earlier pass found, and an unsearched word
+        is never found.
+        """
+        return {w for w, a in self._rules.items() if a == "mute"}
+
+    def action_for(self, word: str, at: float) -> str | None:
+        """What the user already decided about this word at this time, if anything.
+
+        A per-hit decision wins where one exists — it is the more specific instruction,
+        so "mute every f-word except this one line" stays expressible. Otherwise the
+        per-word rule applies.
+        """
+        norm = _norm_word(word)
+        best, best_gap = None, DECISION_TOL
+        for t, w, action in self._hits:
+            if t - at > DECISION_TOL:
+                break
+            gap = abs(t - at)
+            if gap <= best_gap and _norm_word(w) == norm:
+                best, best_gap = action, gap
+        if best is not None:
+            return best
+        return self.rule_for(word)
+
+
+def _word_variants(stem: str) -> set[str]:
+    """Inflections of `stem` that count as the same word.
+
+    Delegates to the pipeline's own matcher so a rule covers exactly the forms the scan
+    would have flagged. Falls back to the bare stem if `tools/` is not importable (the
+    web process adds it to sys.path, but db.py is also imported by tooling that may not).
+    """
+    try:
+        from locate import _variants
+    except ImportError:
+        return {stem}
+    return _variants(stem)
+
+
+def _norm_word(w: str) -> str:
+    """Fold a word to the form decisions are keyed on.
+
+    Uses the same normalisation as the matcher so "Fucking" and "fucking" — and a rule
+    on "fuck" against a hit of "fucking" — resolve together rather than being treated as
+    unrelated words.
+    """
+    import re
+    return re.sub(r"[^a-z]", "", (w or "").lower())
+
+
+def load_decisions(path: str) -> Decisions:
+    """Every review decision and word rule recorded for one title."""
+    conn = connect()
+    per_hit = [
+        (r["at_time"], r["word"], r["action"])
+        for r in conn.execute(
+            "SELECT at_time, word, action FROM decisions WHERE path=?", (path,)
+        ).fetchall()
+    ]
+    rules = {
+        _norm_word(r["word"]): r["action"]
+        for r in conn.execute(
+            "SELECT word, action FROM word_rules WHERE path=?", (path,)
+        ).fetchall()
+    }
+    return Decisions(per_hit, rules)
 
 
 def enabled_words() -> list[str]:

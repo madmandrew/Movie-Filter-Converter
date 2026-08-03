@@ -276,6 +276,41 @@ pre.livelog { max-height: 380px; margin-top: .6rem; }
 }
 .catgroup[open] > summary::before { transform: rotate(90deg); }
 .catgroup > summary > label { display: inline-flex; }
+/* "Mute every instance" strip. Sits above the categories because it is a different
+   question from which tags to apply: these words are muted wherever they occur in the
+   episode, tagged or not. */
+.muteall-strip {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: .5rem .6rem;
+  margin-bottom: .7rem;
+}
+.muteall-head { font-size: .9em; margin-bottom: .4rem; }
+.muteall-head code { color: var(--muted); font-size: .92em; }
+.muteall-words { display: flex; flex-wrap: wrap; gap: .3rem .45rem; }
+.muteall {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  font-size: .88em;
+  padding: .12rem .45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.muteall:hover { background: var(--bg); border-color: var(--muted); }
+/* The tagged-incident count, so "mute all shit" shows how much it adds beyond the 3
+   VidAngel actually marked. */
+.muteall code { color: var(--muted); font-size: .9em; }
+/* Ticked, this silences dialogue nobody reviewed — make that state obvious rather than
+   leaving it as one more grey checkbox in a row of twenty. */
+.muteall:has(input:checked) {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.muteall:has(input:checked) code { color: var(--warn); }
 .incidents {
   margin: .2rem 0 .5rem 1.9rem;
   border-left: 2px solid var(--line);
@@ -294,8 +329,36 @@ pre.livelog { max-height: 380px; margin-top: .6rem; }
   .catgroup > summary::before { transition: none; }
 }
 
-.hit { border-bottom: 1px solid var(--line); padding: .6rem 0; }
+/* --- scan review, grouped by word --- */
+.wordgroup { margin-bottom: .9rem; }
+.wordhead {
+  display: flex;
+  gap: .5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: .35rem .5rem;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.wordhead label { display: inline-flex; align-items: center; gap: .4rem; }
+.wordhead .spacer { flex: 1; }
+.wordgroup > .hits {
+  margin-left: 1.2rem;
+  border-left: 2px solid var(--line);
+  padding-left: .7rem;
+}
+
+.hit { border-bottom: 1px solid var(--line); padding: .6rem 0; display: flex;
+       gap: .55rem; align-items: flex-start; }
+.hit:last-child { border-bottom: 0; }
+.hit .pick { padding-top: .15rem; }
+.hit .hbody { flex: 1; min-width: 0; }
 .hit .ctx { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
 .hit .ctx b { color: var(--warn); }
-.hit .actions { display: flex; gap: .4rem; align-items: center; margin-top: .35rem; }
+.hit .actions { display: flex; gap: .4rem; align-items: center; margin-top: .35rem;
+                flex-wrap: wrap; }
 audio { height: 30px; }

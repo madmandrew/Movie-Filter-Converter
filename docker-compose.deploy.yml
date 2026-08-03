@@ -1,0 +1,47 @@
+# Server-side compose for Unraid. Use this one on the server, not docker-compose.yml.
+#
+# The difference is the absence of `build: .`. The image is built on the dev laptop and
+# copied over as a tarball (see README / the deploy steps below), so there is no source
+# tree on the server to build from — with `build: .` present, `docker compose up -d`
+# tries to rebuild and fails on a missing Dockerfile/context.
+#
+#   # dev laptop
+#   docker build -t movie-filter:latest .
+#   docker save movie-filter:latest | gzip > movie-filter.tar.gz
+#
+#   # copy movie-filter.tar.gz + this file to the server, then
+#   gunzip -c movie-filter.tar.gz | docker load
+#   docker compose -f docker-compose.deploy.yml up -d
+#   curl -s localhost:8080/api/health     # want {"gpu_ok":true,"device":"cuda",...}
+#
+# `--gpus all` (the deploy.resources block below) needs the Unraid Nvidia-Driver plugin.
+# Without it the container still runs on CPU, 10-20x slower; /api/health reports which
+# device Whisper actually got rather than which one was requested.
+
+services:
+  movie-filter:
+    image: movie-filter:latest
+    container_name: movie-filter
+    restart: unless-stopped
+    ports:
+      - "8080:8000"
+    volumes:
+      # Media library. Read-write because filtered output replaces the library copy and
+      # originals are archived into toFilter/unfilteredArchive.
+      - /mnt/user/media:/media
+      # Database, run reports, and cached Whisper model weights. Keep this across
+      # redeploys: it holds the run history and review decisions, and re-downloading the
+      # model weights needs internet the server may not have.
+      - /mnt/user/appdata/movie-filter:/data
+    environment:
+      # Library roots inside the container. Settable in the UI too; this just seeds them.
+      MOVIE_FILTER_ROOTS: >-
+        {"movies":"/media/movies","tv":"/media/tv","kids_movies":"/media/kids_movies",
+         "kids_tv":"/media/kids_tv","toFilter":"/media/toFilter"}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

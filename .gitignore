@@ -17,3 +17,7 @@ data/
 *.db
 *.db-wal
 *.db-shm
+
+# deploy artifact: `docker save | gzip` output, ~1.8 GB, rebuilt from the Dockerfile
+movie-filter.tar.gz
+movie-filter.tar.gz.sha256
