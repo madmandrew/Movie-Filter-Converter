@@ -146,7 +146,9 @@ if (-not $NoTarball) {
 $mins = [math]::Round(((Get-Date) - $started).TotalMinutes, 1)
 Write-Host "`nDone in $mins min." -ForegroundColor Green
 if (-not $NoTarball) {
-    Write-Host "Copy $Tarball to the server, then there:" -ForegroundColor Gray
+    Write-Host "Copy $Tarball + docker-compose.deploy.yml to the server, then there:" -ForegroundColor Gray
     Write-Host "  gunzip -c $Tarball | docker load" -ForegroundColor Gray
     Write-Host "  docker compose -f docker-compose.deploy.yml up -d" -ForegroundColor Gray
+    # Published on 8181 there, not 8080: qBittorrent owns 8080 on that host.
+    Write-Host "  curl -s localhost:8181/api/health   # want device=cuda" -ForegroundColor Gray
 }

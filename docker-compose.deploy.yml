@@ -6,13 +6,16 @@
 # tries to rebuild and fails on a missing Dockerfile/context.
 #
 #   # dev laptop
-#   docker build -t movie-filter:latest .
-#   docker save movie-filter:latest | gzip > movie-filter.tar.gz
+#   .\build.ps1                           # builds, smoke-tests, writes the tarball
 #
 #   # copy movie-filter.tar.gz + this file to the server, then
 #   gunzip -c movie-filter.tar.gz | docker load
 #   docker compose -f docker-compose.deploy.yml up -d
-#   curl -s localhost:8080/api/health     # want {"gpu_ok":true,"device":"cuda",...}
+#   curl -s localhost:8181/api/health     # want {"gpu_ok":true,"device":"cuda",...}
+#
+# This file mirrors the live container's settings. Keep it in step with what is actually
+# running: it is the only record of that config, and a redeploy from a stale copy would
+# silently change the port or drop the log cap.
 #
 # `--gpus all` (the deploy.resources block below) needs the Unraid Nvidia-Driver plugin.
 # Without it the container still runs on CPU, 10-20x slower; /api/health reports which
@@ -23,16 +26,36 @@ services:
     image: movie-filter:latest
     container_name: movie-filter
     restart: unless-stopped
+    # bridge is compose's default for a single service, but it is stated because the app
+    # binds 0.0.0.0 inside the container and reaching it depends on this mapping.
+    network_mode: bridge
     ports:
-      - "8080:8000"
+      # 8181, not the 8080 in the Dockerfile's example: qBittorrent already owns 8080 on
+      # this server, and a collision there fails at `up` with a port-in-use error.
+      - "8181:8000"
     volumes:
-      # Media library. Read-write because filtered output replaces the library copy and
-      # originals are archived into toFilter/unfilteredArchive.
-      - /mnt/user/media:/media
+      # Media library. Read-write is required, not incidental: the filtered file replaces
+      # the library copy under its original name, and the original is moved into
+      # toFilter/unfilteredArchive. Mounted read-only, every run fails at the archive step.
+      # `bind` with create_host_path off: compose otherwise creates a missing source as an
+      # empty directory, which would present an empty library rather than failing.
+      - type: bind
+        source: /mnt/user/media
+        target: /media
+        bind:
+          create_host_path: false
       # Database, run reports, and cached Whisper model weights. Keep this across
       # redeploys: it holds the run history and review decisions, and re-downloading the
       # model weights needs internet the server may not have.
-      - /mnt/user/appdata/movie-filter:/data
+      - /mnt/user/appdata/movie-filter:/data:rw
+    # Runs log per-word progress and ffmpeg output, so an uncapped json-file driver grows
+    # without bound on the writable layer. That is the same disk that filled to 100% from
+    # leaked splice scratch and stopped every container on the host.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "1"
     environment:
       # Library roots inside the container. Settable in the UI too; this just seeds them.
       MOVIE_FILTER_ROOTS: >-

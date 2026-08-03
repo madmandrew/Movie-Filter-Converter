@@ -3,13 +3,19 @@
 # Built for Unraid with GPU passthrough. Whisper runs on CUDA when a GPU is visible and
 # falls back to CPU int8 otherwise (roughly 10-20x slower, but functional).
 #
+# Prefer docker-compose.deploy.yml over this by hand — it carries the live settings
+# (published port, log cap, GPU reservation). The equivalent raw command is:
+#
 #   docker build -t movie-filter .
 #   docker run -d --name movie-filter \
 #     --gpus all \
-#     -p 8080:8000 \
+#     -p 8181:8000 \
+#     --log-opt max-size=50m --log-opt max-file=1 \
 #     -v /mnt/user/media:/media \
 #     -v /mnt/user/appdata/movie-filter:/data \
 #     movie-filter
+#
+# 8181 rather than 8080: qBittorrent already publishes 8080 on the Unraid host.
 #
 # On Unraid, `--gpus all` requires the Nvidia-Driver plugin. Without it the container
 # still runs; check /api/health to see which device Whisper actually got.
