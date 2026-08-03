@@ -17,6 +17,7 @@ splice path and stay byte-identical outside the mutes.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 
@@ -179,27 +180,53 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
     """
     n_audio = audio_track_count(src)
 
+    splice_note = ""
     if quality == "splice" and n_audio == 1:
         import splice as sp
 
-        info = sp.probe(src)
-        ok, reason = sp.can_splice(info)
+        # `probe` and `splice_audio` both refuse rather than splice on geometry they
+        # cannot verify, and every one of those refusals is recoverable — the filter-graph
+        # path below produces a correct file from the same mutes. So a refusal downgrades
+        # the run; it must never fail it.
+        try:
+            info = sp.probe(src)
+            ok, reason = sp.can_splice(info)
+        except ValueError as exc:
+            info, ok, reason = None, False, str(exc)
+
         if ok:
+            # Holds the spliced audio track, so it must go whether the splice succeeds,
+            # is declined, or the remux fails — see the note in splice.splice_audio about
+            # abandoned scratch filling docker.img.
             tmp = tempfile.mkdtemp(prefix="render_")
-            audio = os.path.join(tmp, f"audio.{info.codec}")
-            stats = sp.splice_audio(src, spans, audio, info=info)
-            _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src, "-i", audio,
-                  "-map", "0:v", "-map", "1:a", "-map", "0:s?",
-                  "-c", "copy", "-shortest", dest])
-            total = stats["bytes_reencoded"] + stats["bytes_copied"]
-            return {
-                "mode": "splice", "audio_codec": info.codec, "audio_tracks": 1,
-                "bytes_reencoded": stats["bytes_reencoded"],
-                "pct_reencoded": round(100.0 * stats["bytes_reencoded"] / max(1, total), 3),
-                "summary": (f"splice, {stats['bytes_reencoded']:,} of {total:,} bytes "
-                            f"re-encoded; remainder byte-identical"),
-            }
-        quality = "lossless"
+            try:
+                audio = os.path.join(tmp, f"audio.{info.codec}")
+                try:
+                    stats = sp.splice_audio(src, spans, audio, info=info)
+                except ValueError as exc:
+                    ok, reason = False, str(exc)
+                else:
+                    _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src, "-i", audio,
+                          "-map", "0:v", "-map", "1:a", "-map", "0:s?",
+                          "-c", "copy", "-shortest", dest])
+                    total = stats["bytes_reencoded"] + stats["bytes_copied"]
+                    return {
+                        "mode": "splice", "audio_codec": info.codec, "audio_tracks": 1,
+                        "bytes_reencoded": stats["bytes_reencoded"],
+                        "pct_reencoded": round(
+                            100.0 * stats["bytes_reencoded"] / max(1, total), 3),
+                        "summary": (f"splice, {stats['bytes_reencoded']:,} of {total:,} "
+                                    f"bytes re-encoded; remainder byte-identical"),
+                    }
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+
+        # Leave `quality` alone. Forcing "lossless" here turned every unspliceable file
+        # into FLAC, including ordinary AC3 that only failed the byte-offset checks —
+        # inflating a 448 kbps track and breaking Plex direct play. `_full_encode_args`
+        # already routes genuinely lossless sources to FLAC per stream, so the default
+        # path re-encodes each track to its own codec at its own bitrate.
+        splice_note = f" (splice declined: {reason})"
 
     codec_args = _full_encode_args(src, quality)
     expr = "+".join(f"between(t,{s:.4f},{e:.4f})" for s, e in spans)
@@ -224,7 +251,7 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
         note = f" ({n_audio} audio tracks, all filtered)"
 
     return {"mode": quality, "audio_tracks": n_audio,
-            "summary": f"full audio re-encode ({quality}){note}"}
+            "summary": f"full audio re-encode ({quality}){note}{splice_note}"}
 
 
 def _audio_streams(src: str) -> list[dict]:
