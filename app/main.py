@@ -936,11 +936,16 @@ def api_run(body: RunIn):
                                  "mute/cut, choose a VideoSkip filter, enable nudity "
                                  "detection, or enable the word-list scan")
 
-    # Default output/archive paths: filtered file replaces the library copy, original
-    # goes to unfilteredArchive next to the configured toFilter root.
+    # Default output/archive paths: the filtered file takes the source's own name, so the
+    # library keeps exactly one file per title and Plex has nothing to disambiguate. The
+    # original survives only in unfilteredArchive, which is why the archive is mandatory
+    # and the swap in jobs.py refuses to run without a verified one.
+    #
+    # This used to default to `{stem}.FILTERED{ext}`, which left the unfiltered original
+    # sitting beside the filtered copy and both visible to Plex. An explicit output_path
+    # is still honoured as-is — a caller asking for a separate file gets one.
     if not opts["output_path"]:
-        stem, ext = os.path.splitext(body.path)
-        opts["output_path"] = f"{stem}.FILTERED{ext}"
+        opts["output_path"] = body.path
     if not opts["archive_path"]:
         opts["archive_path"] = library.archive_path_for(body.path)
 

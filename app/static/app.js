@@ -796,7 +796,7 @@ async function openFilter(path, prefill = null) {
         share is read-only.</p>
       <label class="row"><span style="min-width:5.5rem">Filtered</span>
         <input id="mout" style="flex:1 1 24rem" spellcheck="false"
-          value="${esc(pf.output_path || '')}" placeholder="…FILTERED.mkv beside the source"></label>
+          value="${esc(pf.output_path || '')}" placeholder="replaces the source file (original goes to the archive)"></label>
       <label class="row"><span style="min-width:5.5rem">Archive</span>
         <input id="march" style="flex:1 1 24rem" spellcheck="false"
           value="${esc(pf.archive_path || '')}" placeholder="from the Settings template"></label>

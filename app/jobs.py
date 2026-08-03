@@ -992,14 +992,62 @@ def _execute(run_id: int) -> None:
                 os.remove(tmp_out)
             raise
 
+        # The render is only trustworthy if it actually produced a file with bytes in it.
+        # ffmpeg can exit 0 having written nothing, and the next step deletes the library
+        # copy — so check before, not after.
+        if not os.path.exists(tmp_out) or os.path.getsize(tmp_out) == 0:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+            raise RuntimeError(
+                f"the render reported success but produced no output at {tmp_out}; the "
+                f"library file was left untouched"
+            )
+
+        # `out` is the title's own path by default, so the filtered file replaces the
+        # library copy under the same name and Plex sees one file per title. That means
+        # deleting the original, which is only safe because the archive above already
+        # holds it — refuse if it somehow does not.
+        #
+        # `path` is the file just read: on a re-run that is the archive itself, and
+        # removing it would destroy the only remaining original.
+        source_is_archive = False
+        if archive and os.path.exists(archive):
+            try:
+                source_is_archive = os.path.samefile(archive, path)
+            except OSError:
+                source_is_archive = False
+
         replaced = os.path.exists(out)
         if replaced:
+            same_as_archive = False
+            if archive and os.path.exists(archive):
+                try:
+                    same_as_archive = os.path.samefile(archive, out)
+                except OSError:
+                    same_as_archive = False
+            if same_as_archive:
+                raise RuntimeError(
+                    f"the output path {out} resolves to the archive; refusing to "
+                    f"overwrite the only original"
+                )
+            if not (archive and os.path.exists(archive)):
+                raise RuntimeError(
+                    f"refusing to replace {out} with no archived original to fall back "
+                    f"on; point the archive at a writable location in Settings"
+                )
             os.remove(out)
         os.replace(tmp_out, out)
 
+        # A run that read the library copy under its own name has now consumed it: `out`
+        # is that same path, so the replace above already removed the original and the
+        # archive is the only copy left. Nothing further to clean up — but when the caller
+        # asked for a *different* output_path, the untouched original is still on disk and
+        # is meant to stay there.
         report["render"] = stats
         _log(run_id, f"{'replaced' if replaced else 'rendered'} {out}: "
                      f"{stats.get('summary','')}")
+        if source_is_archive:
+            _log(run_id, f"re-run: original preserved at {archive}")
 
         # Verify the cuts actually removed what they were meant to. Cutting shifts the
         # timeline, so the region to re-check is where each removed range *used to be* —
