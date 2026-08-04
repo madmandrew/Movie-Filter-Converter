@@ -396,9 +396,15 @@ def _splice_audio(
         chunks.append(data[len(data) - remainder:])
 
     # A mute only ever replaces bytes in place, so the spliced stream must be exactly as
-    # long as the source. Anything else means offsets ran off the end and audio was lost —
-    # Severance S01E01 came out 117 s short and the `-shortest` remux quietly trimmed the
-    # video to match.
+    # long as the source. Anything else means offsets ran off the end and audio was lost.
+    #
+    # This guard covers THIS function's output only, and that is not the whole story: on
+    # Severance S01E01 the splice was exact and passed here (107,397 frames, matching the
+    # container to 0.03 s) and the file still lost 117 s of audio, because the `-shortest`
+    # remux in render.py truncated it afterwards. Note it did NOT trim the video to match
+    # — video ran to full length while audio stopped early, which is why the file looked
+    # fine by duration alone. Passing here does not mean the rendered file is intact; see
+    # `render._assert_not_truncated`.
     out_len = sum(len(c) for c in chunks)
     if out_len != len(data):
         short = (len(data) - out_len) / (frame_bytes / frame)

@@ -206,9 +206,23 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
                 except ValueError as exc:
                     ok, reason = False, str(exc)
                 else:
+                    # No `-shortest` here, ever. The spliced track is a raw elementary
+                    # stream with no container duration, so ffmpeg cannot compare its
+                    # length against the video and stops early — it truncated 9.4s out of
+                    # a 59s sample, and cost Severance S01E01 107s and S01E02 62s of audio
+                    # off the end while the video ran on to full length. That asymmetry
+                    # (audio short, video long) is the signature: queued video packets
+                    # still flush past the cut point, so a truncated file does NOT look
+                    # like the usual `-shortest` even-trim.
+                    #
+                    # The flag protects against nothing here. A mute replaces bytes in
+                    # place, so the spliced stream is exactly as long as the source, and
+                    # `splice_audio` already refuses outright if it is not (see the length
+                    # guard at the end of that function).
                     _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src, "-i", audio,
                           "-map", "0:v", "-map", "1:a", "-map", "0:s?",
-                          "-c", "copy", "-shortest", dest])
+                          "-c", "copy", dest])
+                    _assert_not_truncated(src, dest)
                     total = stats["bytes_reencoded"] + stats["bytes_copied"]
                     return {
                         "mode": "splice", "audio_codec": info.codec, "audio_tracks": 1,
@@ -252,6 +266,54 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
 
     return {"mode": quality, "audio_tracks": n_audio,
             "summary": f"full audio re-encode ({quality}){note}{splice_note}"}
+
+
+#: How far the output may fall short of the source before it is treated as truncated.
+#: Container durations disagree by a frame or two between muxes, and a mute never changes
+#: length, so anything past this is lost audio rather than rounding.
+_TRUNCATION_TOLERANCE = 1.0
+
+
+def _stream_end(path: str, stream: str) -> float | None:
+    """When the last packet of `stream` finishes, in seconds. None if unreadable.
+
+    Read from packets, not `stream=duration`: Matroska reports no per-stream duration
+    (both Severance episodes came back `N/A`), so the container-level figure is the only
+    one available and it does not say whether a single track ends early.
+    """
+    out = subprocess.run(
+        [_tool("ffprobe"), "-v", "error", "-select_streams", stream,
+         "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0",
+         "-read_intervals", "999999%+#1", "--", path],
+        capture_output=True, text=True,
+    ).stdout
+    for line in reversed(out.splitlines()):
+        parts = [p for p in line.strip().split(",") if p]
+        try:
+            return sum(float(p) for p in parts[:2])
+        except ValueError:
+            continue
+    return None
+
+
+def _assert_not_truncated(src: str, dest: str) -> None:
+    """Fail if the rendered file lost audio off the end.
+
+    `-shortest` silently cut 107s off one episode and 62s off another, and every other
+    check passed: the byte-splice was exact, its own length guard was satisfied, and the
+    run reported success. Nothing compared the *output* against the source, so the damage
+    only surfaced on playback. This is that comparison.
+    """
+    for stream, label in (("a:0", "audio"), ("v:0", "video")):
+        src_end = _stream_end(src, stream)
+        out_end = _stream_end(dest, stream)
+        if src_end is None or out_end is None:
+            continue  # nothing to compare against; not evidence of a problem
+        if src_end - out_end > _TRUNCATION_TOLERANCE:
+            raise ValueError(
+                f"rendered {label} ends at {out_end:.1f}s but the source runs to "
+                f"{src_end:.1f}s — {src_end - out_end:.1f}s was lost off the end"
+            )
 
 
 def _audio_streams(src: str) -> list[dict]:
