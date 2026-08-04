@@ -223,9 +223,16 @@ def locate(
     `search_pad` must exceed the worst expected drift. VidAngel's integer-second
     rounding is ~1s, but a filter keyed to a different master can be 12s+ out — pass
     a larger pad (or a pre-computed global offset) for those.
+
+    A caller applying a global offset can hand us a window that lies entirely before
+    t=0. Clamping only `w0` there left `w1` negative and ffmpeg was called with
+    `-ss 0 -to -31.052`, which it rejects — killing the whole run over one incident.
+    Both ends are clamped, and a window with nothing left of it is simply not found.
     """
     w0 = max(0.0, approx_start - search_pad)
-    w1 = approx_end + search_pad
+    w1 = max(0.0, approx_end + search_pad)
+    if w1 <= w0:
+        return None
     words = transcribe_window(video, w0, w1, model=model, hotwords=expected)
     if not words:
         return None

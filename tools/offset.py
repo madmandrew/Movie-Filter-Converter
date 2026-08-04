@@ -55,6 +55,12 @@ TIGHT_MIN_SUPPORT = 2
 #: apart agreeing to a fraction of a second could not.
 TIGHT_MIN_BASELINE = 60.0
 
+#: Distinct words the tight cluster must draw on. One word tagged M times and heard N
+#: times yields M*N deltas that are not independent evidence — a coincidental near-tie
+#: among them is likely, not remarkable. Two different words agreeing is not reachable
+#: by that route. The For All Mankind case the tight rule was built for already had two.
+TIGHT_MIN_WORDS = 2
+
 
 def estimate(
     expected: list[tuple[float, str]],
@@ -72,17 +78,18 @@ def estimate(
     Returns an estimate with `confident=False` rather than guessing when support is thin —
     a wrong offset is far worse than none, since it would move every mute.
     """
-    # (delta, source time) — the source time is kept so the cluster's baseline can be
-    # measured. Support count alone cannot tell two agreeing points in one scene from
-    # two an episode apart, and only the latter pins a constant offset.
-    deltas: list[tuple[float, float]] = []
+    # (delta, source time, word) — the source time is kept so the cluster's baseline can
+    # be measured, the word so the tight rule can tell independent evidence from many
+    # pairings of one repeated word. Support count alone cannot tell two agreeing points
+    # in one scene from two an episode apart, and only the latter pins a constant offset.
+    deltas: list[tuple[float, float, str]] = []
     considered = 0
 
     for want_t, word in expected:
         w = (word or "").lower()
         if not w:
             continue
-        cands = [(obs_t - want_t, want_t) for obs_t, obs_w in observed
+        cands = [(obs_t - want_t, want_t, w) for obs_t, obs_w in observed
                  if obs_w.lower() == w and abs(obs_t - want_t) <= max_offset]
         if cands:
             considered += 1
@@ -93,20 +100,21 @@ def estimate(
 
     # Densest cluster: for each delta, count neighbours within tolerance.
     deltas.sort()
-    best_members: list[tuple[float, float]] = []
-    for d, _t in deltas:
-        members = [(x, t) for x, t in deltas if abs(x - d) <= tolerance]
+    best_members: list[tuple[float, float, str]] = []
+    for d, _t, _w in deltas:
+        members = [(x, t, w) for x, t, w in deltas if abs(x - d) <= tolerance]
         if len(members) > len(best_members):
             best_members = members
 
     n = len(best_members)
-    vals = [x for x, _t in best_members]
+    vals = [x for x, _t, _w in best_members]
     mean = sum(vals) / n
     var = sum((x - mean) ** 2 for x in vals) / n
     spread = var ** 0.5
 
-    src_times = [t for _x, t in best_members]
+    src_times = [t for _x, t, _w in best_members]
     baseline = max(src_times) - min(src_times)
+    distinct_words = len({w for _x, _t, w in best_members})
 
     # Two independent routes to confidence.
     #
@@ -116,8 +124,19 @@ def estimate(
     # not a credible explanation. This exists because the broad rule is unreachable on
     # an episode where most tags name words the transcript never produced: support is
     # capped by how many tags could vote at all, not by how right the answer is.
+    #
+    # The distinct-word requirement bounds the coincidence argument. A word tagged M
+    # times and heard N times contributes M*N candidate deltas, all free to fall
+    # anywhere in ±max_offset, so the chance that *some* pair of them lands within
+    # TIGHT_SPREAD grows with the square of how common the word is — the p ≈ 0.0006
+    # figure above holds for one pairing, not for the ~100 that a heavily-repeated word
+    # generates. Measured: Severance S01E02 (run 41) accepted -95.05s on 5/12 tags from
+    # repeated pairings of one word, against a -52s runtime delta; the offset pushed a
+    # 54s tag to -41s and the run died. Two *different* words agreeing cannot be
+    # manufactured that way.
     tight = (n >= TIGHT_MIN_SUPPORT and spread <= TIGHT_SPREAD
-             and baseline >= TIGHT_MIN_BASELINE)
+             and baseline >= TIGHT_MIN_BASELINE
+             and distinct_words >= TIGHT_MIN_WORDS)
 
     return OffsetEstimate(offset=mean, support=n, considered=considered,
                           spread=spread, confident=broad or tight)

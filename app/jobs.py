@@ -403,10 +403,28 @@ def _execute(run_id: int) -> None:
 
         w0, w1 = inc.search_window()
         centre = inc.start_approx + tag_offset
+        pad = (w1 - w0) / 2
+
+        # An offset can push an early tag off the front of the file (or a late one past
+        # the end). There is no audio to search there, so flag it instead of searching a
+        # clamped window at t=0 and reporting whatever word happens to be there.
+        if centre + pad <= 0 or centre - pad >= duration:
+            results.append({
+                "ref_id": inc.ref_id, "word": label,
+                "bucket": inc.start_approx, "status": "NOT_FOUND",
+                "note": f"the {tag_offset:+.0f}s offset puts this tag at "
+                        f"{centre:.0f}s, outside the file (0-{duration:.0f}s) — "
+                        f"nothing muted. The offset or the tag-set is likely wrong "
+                        f"for this cut.",
+            })
+            _log(run_id, f"  {inc.ref_id} {label} @{inc.start_approx:.0f}s: offset "
+                         f"puts it at {centre:.0f}s, outside the file — skipped")
+            continue
+
         best = None
         for cand in inc.words:
             m = locate(path, cand, centre, centre, fps,
-                       model=model, search_pad=(w1 - w0) / 2)
+                       model=model, search_pad=pad)
             if m and (best is None or m.confidence > best.confidence):
                 best = m
         if best is None:
