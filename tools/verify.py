@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 import align as _align
 from align import _tool, transcribe_window
-from locate import _matches, _variants, _norm, snap_to_frames
+from locate import HALLUCINATION_P, _matches, _variants, _norm, snap_to_frames
 
 
 @dataclass
@@ -71,8 +71,9 @@ def render_muted(
 
 #: Below this probability a "word" in muted audio is a language-model hallucination
 #: from context, not real audio. Measured on silenced clips: genuine speech scores
-#: p>0.5, words invented from silence score p<0.10.
-_HALLUCINATION_P = 0.25
+#: p>0.5, words invented from silence score p<0.10. Defined in `locate` and re-exported
+#: here: `locate` applies the same floor when *finding* a word, and the two must agree.
+_HALLUCINATION_P = HALLUCINATION_P
 
 #: Function words whose partial clipping at a mute edge is inaudible in practice.
 _STOPWORDS = {

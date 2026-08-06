@@ -101,6 +101,12 @@ def _variants(word: str) -> set[str]:
 #: that a lenient profanity matcher would otherwise flag.
 _NEVER = {"as", "is", "at", "us", "it", "an", "a", "he", "she", "gas", "has", "was"}
 
+#: Below this probability a decoded word is a language-model invention, not audio.
+#: Measured on silenced clips: genuine speech scores p>0.5, words invented from silence
+#: score p<0.10. `verify._HALLUCINATION_P` is this same constant — it lives here because
+#: verify imports from locate and not the other way round.
+HALLUCINATION_P = 0.25
+
 
 def _matches(word_norm: str, targets: set[str]) -> bool:
     """Does a transcript word match any target?
@@ -234,16 +240,58 @@ def locate(
     if w1 <= w0:
         return None
     words = transcribe_window(video, w0, w1, model=model, hotwords=expected)
-    if not words:
-        return None
 
     targets = set()
     for tok in expected.split():
         targets |= _variants(tok)
 
+    # No early exit on an empty `hits`: the honest decode below can hear a word the
+    # biased one missed (S02E03 at 1514.9s), and returning here would lose it.
     hits = [w for w in words if _matches(w.norm, targets)]
-    if not hits:
+
+    # The decode above was biased with `hotwords=expected`, which is necessary — Whisper
+    # sanitises profanity and recall collapses without it — but on a stretch with no
+    # speech the bias manufactures the word outright. Measured on Severance S01E07's
+    # title sequence (instrumental music, no dialogue): hotwords='fucker' emitted
+    # 'fucker' at p=0.004 while the unbiased decode of the same window returned no words
+    # at all. At 392.85s "You" (p=0.067) came back as 'fucker' (p=0.003). Those became
+    # mutes over the opening titles.
+    #
+    # The probability from the *biased* decode cannot be the test, in either direction:
+    # biasing deflates a genuine hit's score just as it inflates an invented one. A real
+    # "Fuck." at 2350.7s scored p=0.118 with hotwords and p=0.759 without — a floor on
+    # the biased score would have thrown away a word that is plainly in the audio.
+    #
+    # So corroborate instead: decode the window again WITHOUT hotwords and keep only the
+    # hits that survive there too. This is the rule `verify` already applies when asking
+    # whether a word is still audible ("run WITHOUT hotwords and with a confidence
+    # floor"); it was simply never applied when *finding* the word. Nothing rejected
+    # these before because `verify` runs after the mute is placed and asks whether the
+    # word is gone — which muted silence passes trivially.
+    honest = transcribe_window(video, w0, w1, model=model)
+    corroborated = [
+        w for w in honest
+        if _matches(w.norm, targets) and w.probability >= HALLUCINATION_P
+    ]
+    if not corroborated:
         return None
+
+    # Keep the biased decode's word boundaries — hotwords give tighter, more reliable
+    # timings on the word we care about — but only for hits the honest pass also heard
+    # at roughly the same place. Half a second of tolerance covers the two decodes
+    # disagreeing on exact edges without letting a different utterance vouch for this one.
+    hits = [
+        w for w in hits
+        if any(abs(w.start - c.start) <= 0.5 or abs(w.end - c.end) <= 0.5
+               for c in corroborated)
+    ]
+    # The two decodes can disagree the other way round: at 1515.5s of S02E03 the honest
+    # pass hears "Shit." (p=0.504) and the biased pass, having merged the audio into a
+    # long low-probability 'look', hears no target at all. The honest decode is the more
+    # trustworthy witness, so let it stand on its own rather than losing a real word to
+    # the bias that was meant to help find it.
+    if not hits:
+        hits = corroborated
 
     # Prefer the hit closest to where VidAngel said it was.
     mid = (approx_start + approx_end) / 2.0
