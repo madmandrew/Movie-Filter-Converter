@@ -369,13 +369,27 @@ def _render_with_cuts(src, dest, mutes, cuts, quality) -> dict:
         f"between(t,{a:.4f},{b:.4f})" for a, b in _complement(cuts)
     ) or "1"
 
+    # `shifted` is the OUTPUT timeline — what the report needs, and what a viewer
+    # scrubbing the finished file would see. It is deliberately NOT what the filter
+    # expression below uses.
     shifted = shift_mutes(mutes, cuts)
-    mute_expr = "+".join(f"between(t,{s:.4f},{e:.4f})" for _r, s, e in shifted)
 
-    # Mutes are applied BEFORE the cut selection, in input-timeline coordinates, and the
-    # `keep` selection then removes frames. Applying them after would require the shifted
-    # times — which is what `shift_mutes` computes for reporting, but doing it in one
-    # chain is simpler and avoids a second timeline translation.
+    # `volume` sits before `aselect` in the chain, so its `enable` expression is evaluated
+    # against the INPUT timeline — source times, uncorrected for any cut. Feeding it the
+    # shifted times applied the cut correction a second time and every mute after a cut
+    # fired early by the total duration cut before it. Severance S01E06 had one 8.4s cut
+    # and every later mute landed 8.4s before its word.
+    #
+    # A mute dropped by shift_mutes (it fell inside a cut) must also be dropped here, or
+    # it would silence audio that survives. Recomputed with the same predicate rather than
+    # matched against `shifted` by ref: recovered mutes share a ref stem and a span, so a
+    # ref set is not a reliable key.
+    ordered = sorted(cuts, key=lambda c: c["start"])
+    kept = [
+        (s, e) for _ref, s, e in mutes
+        if not any(c["start"] <= s and e <= c["end"] for c in ordered)
+    ]
+    mute_expr = "+".join(f"between(t,{s:.4f},{e:.4f})" for s, e in kept)
     n_audio = audio_track_count(src)
     a_chain = f"aselect='{keep}',asetpts=N/SR/TB"
     if mute_expr:
