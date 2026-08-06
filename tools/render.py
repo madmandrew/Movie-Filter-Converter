@@ -21,11 +21,12 @@ import shutil
 import subprocess
 import tempfile
 
+import align as _align
 from align import _tool
 
 
 def _run(args: list[str]) -> None:
-    subprocess.run(args, check=True, capture_output=True)
+    _align.run_proc(args, check=True, capture_output=True)
 
 
 #: Hardware encoder candidates, tried in order and **verified by actually encoding**.
@@ -70,7 +71,7 @@ _encoder_cache: dict[str, list[str]] = {}
 def _encoder_works(args: list[str]) -> bool:
     """Try a 12-frame encode of colour bars. Cheap, and catches driver mismatches."""
     try:
-        subprocess.run(
+        _align.run_proc(
             [_tool("ffmpeg"), "-v", "error", "-y",
              "-f", "lavfi", "-i", "testsrc=size=640x360:rate=24:duration=0.5",
              *args, "-f", "null", os.devnull],
@@ -91,7 +92,7 @@ def _video_encoder(src: str, prefer_hw: bool = True) -> list[str]:
     Keeps the source codec family: an HEVC source stays HEVC rather than being
     silently downgraded to H.264.
     """
-    codec_out = subprocess.run(
+    codec_out = _align.run_proc(
         [_tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=codec_name", "-of", "csv=p=0", "--", src],
         capture_output=True, text=True,
@@ -160,7 +161,7 @@ def render(
 
 
 def audio_track_count(src: str) -> int:
-    out = subprocess.run(
+    out = _align.run_proc(
         [_tool("ffprobe"), "-v", "error", "-select_streams", "a",
          "-show_entries", "stream=index", "-of", "csv=p=0", "--", src],
         capture_output=True, text=True,
@@ -281,7 +282,7 @@ def _stream_end(path: str, stream: str) -> float | None:
     (both Severance episodes came back `N/A`), so the container-level figure is the only
     one available and it does not say whether a single track ends early.
     """
-    out = subprocess.run(
+    out = _align.run_proc(
         [_tool("ffprobe"), "-v", "error", "-select_streams", stream,
          "-show_entries", "packet=pts_time,duration_time", "-of", "csv=p=0",
          "-read_intervals", "999999%+#1", "--", path],
@@ -318,7 +319,7 @@ def _assert_not_truncated(src: str, dest: str) -> None:
 
 def _audio_streams(src: str) -> list[dict]:
     """Per-stream codec/bitrate for every audio track."""
-    out = subprocess.run(
+    out = _align.run_proc(
         [_tool("ffprobe"), "-v", "error", "-select_streams", "a",
          "-show_entries", "stream=index,codec_name,profile,bit_rate,channels",
          "-of", "json", "--", src],

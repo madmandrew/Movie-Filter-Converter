@@ -18,6 +18,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 
+import align
 from align import _tool
 
 
@@ -43,31 +44,43 @@ def detect_cuts(video: str, threshold: float = 0.35, scale: int = 320,
     tell it apart from a hang.
     """
     vf = f"scale={scale}:-2,select='gt(scene,{threshold})',showinfo"
+    align.check_cancelled()
     proc = subprocess.Popen(
         [_tool("ffmpeg"), "-v", "info", "-nostats", "-i", video,
          "-an", "-sn", "-vf", vf, "-f", "null", os.devnull],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         errors="replace", bufsize=1,
     )
+    # This is the longest single stage in a run — one full decode, ~25 minutes on a
+    # feature-length film — so it has to be killable rather than merely checked between
+    # stages. Registering the handle is what lets a cancel reach it mid-decode.
+    align.register_child(proc)
 
     cuts: list[float] = []
     assert proc.stderr is not None
-    for line in proc.stderr:
-        if "pts_time:" not in line:
-            continue
-        tail = line.split("pts_time:", 1)[1]
-        token = tail.split()[0].rstrip(",")
-        try:
-            cuts.append(float(token))
-            if progress:
-                progress(cuts[-1], len(cuts))
-        except ValueError:
-            continue
+    try:
+        for line in proc.stderr:
+            if "pts_time:" not in line:
+                continue
+            tail = line.split("pts_time:", 1)[1]
+            token = tail.split()[0].rstrip(",")
+            try:
+                cuts.append(float(token))
+                if progress:
+                    progress(cuts[-1], len(cuts))
+            except ValueError:
+                continue
 
-    # stderr has been consumed by the loop above, so wait for the exit code rather than
-    # trying to read it again. ffmpeg exits 255 at end-of-stream on this filter graph even
-    # on success, so only other non-zero codes are real failures.
-    proc.wait()
+        # stderr has been consumed by the loop above, so wait for the exit code rather
+        # than trying to read it again. ffmpeg exits 255 at end-of-stream on this filter
+        # graph even on success, so only other non-zero codes are real failures.
+        proc.wait()
+    finally:
+        align.unregister_child(proc)
+
+    # A killed child ends the read loop with a partial cut list and a non-zero code, which
+    # would otherwise be reported as a scene-detection failure.
+    align.check_cancelled()
     if not cuts and proc.returncode not in (0, 255):
         raise RuntimeError(
             f"scene detection failed (rc={proc.returncode}) — check that the file is "

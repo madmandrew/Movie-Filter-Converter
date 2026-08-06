@@ -1120,6 +1120,31 @@ const humanAge = (s) => {
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 };
 
+/** Cancel a run. Confirms first when it is already running, since that throws away
+ *  however long it has been going — a full-film pass is over an hour. Returns whether
+ *  the request went through, so callers can decide whether to refresh. */
+async function cancelRun(id, status) {
+  if (status === 'running') {
+    const ok = await confirmDialog(
+      `Stop run #${id}?`,
+      'The work done so far is lost — nothing resumes, so re-running starts from the '
+      + 'beginning. Your media file is not modified: the filtered copy is only swapped '
+      + 'in once it is complete.',
+      { okText: 'Stop the run', danger: true },
+    );
+    if (!ok) return false;
+  }
+  try {
+    const r = await postJSON(`/api/runs/${id}/cancel`, {});
+    toast(r.stopped ? `Run #${id} cancelled`
+      : `Run #${id} is stopping — this can take a few seconds`);
+    return true;
+  } catch (e) {
+    toast(e.message, 'error');
+    return false;
+  }
+}
+
 async function loadLive() {
   let d;
   try {
@@ -1199,6 +1224,16 @@ async function loadLive() {
           ? `<span class="muted">running ${humanAge(r.elapsed)}</span>` : ''}
         ${stall}
         ${q}
+        ${['queued', 'running'].includes(r.status)
+          ? `<button class="secondary livecancel" data-id="${r.id}"
+               data-status="${r.status}"
+               ${r.stage === 'cancelling' ? 'disabled' : ''}
+               title="${r.status === 'running'
+                 ? 'Stop this run — the work so far is lost, the media file is untouched'
+                 : 'Remove this job from the queue'}"
+               >${r.stage === 'cancelling' ? 'stopping…'
+                 : r.status === 'running' ? 'Stop' : 'Cancel'}</button>`
+          : ''}
         <button class="secondary livetoggle" data-id="${r.id}"
           style="margin-left:auto">${open ? 'Hide log' : 'Show log'}</button>
         <button class="secondary livecopy" data-id="${r.id}"
@@ -1217,6 +1252,13 @@ async function loadLive() {
   $$('.livetoggle').forEach((b) => b.addEventListener('click', () => {
     const id = String(b.dataset.id);
     if (liveOpen.has(id)) liveOpen.delete(id); else liveOpen.add(id);
+    loadLive();
+  }));
+
+  $$('#livebody .livecancel').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    const ok = await cancelRun(b.dataset.id, b.dataset.status);
+    if (!ok) b.disabled = false;
     loadLive();
   }));
 
@@ -1306,7 +1348,14 @@ async function loadRuns() {
              <button class="secondary qmove" data-id="${r.id}" data-to="down"
                title="Move down one place"
                ${r.queue_position === r.queue_length ? 'disabled' : ''}>↓</button>
-             <button class="secondary runcancel" data-id="${r.id}">Cancel</button>` : ''}
+             <button class="secondary runcancel" data-id="${r.id}"
+               data-status="queued">Cancel</button>` : ''}
+        ${r.status === 'running'
+          ? `<button class="secondary runcancel" data-id="${r.id}" data-status="running"
+               ${r.stage === 'cancelling' ? 'disabled' : ''}
+               title="Stop this run — the work so far is lost, the media file is untouched"
+               >${r.stage === 'cancelling' ? 'stopping…' : 'Stop'}</button>`
+          : ''}
         ${['done', 'failed', 'cancelled'].includes(r.status)
           ? `<button class="secondary runedit" data-id="${r.id}"
                title="Reopen these settings to adjust and re-run">Edit &amp; re-run</button>`
@@ -1317,12 +1366,11 @@ async function loadRuns() {
 
   $$('.rundet').forEach((b) => b.addEventListener('click', () => showRun(b.dataset.id)));
   $$('.runedit').forEach((b) => b.addEventListener('click', () => editRun(b.dataset.id)));
-  // Only queued runs can be cancelled — a running job is mid-write in ffmpeg/Whisper.
-  $$('.runcancel').forEach((b) => b.addEventListener('click', async () => {
-    try {
-      await postJSON(`/api/runs/${b.dataset.id}/cancel`, {});
-      loadRuns();
-    } catch (e) { toast(e.message, 'error'); }
+  $$('#runs .runcancel').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    const ok = await cancelRun(b.dataset.id, b.dataset.status);
+    if (!ok) b.disabled = false;
+    loadRuns();
   }));
   // Re-prioritise a pending run. Same handler shape as the live view; this table is not
   // auto-refreshed, so it reloads explicitly.

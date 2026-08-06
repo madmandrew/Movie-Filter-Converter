@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from align import Word, get_model, probe_duration, transcribe_window
+from align import Word, check_cancelled, get_model, probe_duration, transcribe_window
 from locate import _matches, _variants
 
 
@@ -68,6 +68,10 @@ def scan(
     hits: list[Hit] = []
     t = start
     while t < end:
+        # Whisper inference runs in-process, so killing a child cannot interrupt it.
+        # Checking once per chunk bounds how long a cancel takes to land at one chunk of
+        # GPU work — seconds — without having to abort a decode mid-flight.
+        check_cancelled()
         c1 = min(end, t + chunk)
         w0 = max(start, t - overlap)
         got = transcribe_window(video, w0, c1, model=model)

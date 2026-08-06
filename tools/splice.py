@@ -37,6 +37,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 
+import align as _align
 from align import _tool
 
 #: Codecs whose muted segment can be re-encoded to the same codec, making splice
@@ -90,7 +91,7 @@ def _probe_frame_samples(video: str) -> int | None:
     and no whitespace-split token is a bare integer — which is how this silently returned
     nothing for every AC3/E-AC3 file in the library.
     """
-    out = subprocess.run(
+    out = _align.run_proc(
         [_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
          "-read_intervals", "60%+0.5", "-show_frames",
          "-show_entries", "frame=nb_samples", "-of", "json", "--", video],
@@ -116,7 +117,7 @@ def probe(video: str) -> AudioInfo:
     offset is only correct if this value is exact, so guessing is not an option — the
     caller must fall back to the re-encode path instead.
     """
-    out = subprocess.run(
+    out = _align.run_proc(
         [_tool("ffprobe"), "-v", "error", "-select_streams", "a:0",
          "-show_entries", "stream=codec_name,profile,channels,sample_rate,bit_rate",
          "-of", "default=noprint_wrappers=1", "--", video],
@@ -261,7 +262,7 @@ def _encode_silence(tmp: str, info: AudioInfo, encoder: str, frames: int) -> byt
         if info.bit_rate:
             args += ["-b:a", info.bit_rate]
         args += ["-f", info.codec, out]
-        subprocess.run(args, check=True, capture_output=True)
+        _align.run_proc(args, check=True, capture_output=True)
     return open(out, "rb").read()
 
 
@@ -308,7 +309,7 @@ def _splice_audio(
     frame = info.frame_duration
     encoder = SPLICEABLE[info.codec]
 
-    dur = float(subprocess.run(
+    dur = float(_align.run_proc(
         [_tool("ffprobe"), "-v", "error", "-show_entries", "format=duration",
          "-of", "csv=p=0", "--", video], capture_output=True, text=True, check=True,
     ).stdout.strip())
@@ -317,7 +318,7 @@ def _splice_audio(
     # the segment cuts away from video interleaving.
     ext = "mka"
     base = os.path.join(tmp, f"base.{ext}")
-    subprocess.run(
+    _align.run_proc(
         [_tool("ffmpeg"), "-v", "error", "-y", "-i", video, "-vn", "-sn",
          "-map", "0:a:0", "-c:a", "copy", base],
         check=True, capture_output=True,
@@ -338,7 +339,7 @@ def _splice_audio(
     # remainder**). So frame N always starts at byte N*frame_bytes, and cutting by byte
     # offset is exact by construction — no timestamps, nothing to round, zero drift.
     raw = os.path.join(tmp, "base.raw")
-    subprocess.run(
+    _align.run_proc(
         [_tool("ffmpeg"), "-v", "error", "-y", "-i", base, "-c:a", "copy",
          "-f", info.codec, raw],
         check=True, capture_output=True,
@@ -418,13 +419,13 @@ def _splice_audio(
         for c in chunks:
             fh.write(c)
 
-    subprocess.run(
+    _align.run_proc(
         [_tool("ffmpeg"), "-v", "error", "-y", "-f", info.codec, "-i", spliced_raw,
          "-c:a", "copy", dest],
         check=True, capture_output=True,
     )
 
-    out_dur = float(subprocess.run(
+    out_dur = float(_align.run_proc(
         [_tool("ffprobe"), "-v", "error", "-show_entries", "format=duration",
          "-of", "csv=p=0", "--", dest], capture_output=True, text=True, check=True,
     ).stdout.strip())

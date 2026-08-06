@@ -1241,22 +1241,52 @@ def api_rerun(run_id: int):
 
 @app.post("/api/runs/{run_id}/cancel")
 def api_cancel(run_id: int):
-    """Cancel a run that has not started yet.
+    """Cancel a run, whether it is queued or already running.
 
-    A running job is not interrupted — ffmpeg and Whisper are mid-write, and killing
-    them could leave a partial output file next to a real library file.
+    A queued run is dropped outright. A running one is asked to stop: the worker's
+    ffmpeg/ffprobe child is killed and the in-process stages (Whisper, NudeNet) check
+    between chunks, so the stop lands anywhere from immediately to a few seconds later.
+    The response returns as soon as the request is delivered rather than waiting for the
+    worker to unwind — the caller polls the run's status for that.
+
+    Cancelling never damages the library copy: the render writes to a `.partial` file and
+    only swaps it in once complete, so a stop before that point leaves the original
+    exactly as it was. After the swap the run is past the point of no return and finishes.
     """
-    with db.tx() as c:
-        row = c.execute("SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "unknown run")
-        if row["status"] != "queued":
-            raise HTTPException(409, f"cannot cancel a {row['status']} run")
-        # Clear the queue position along with the status: the pending queue is derived
-        # from that column, and a cancelled run must drop out of it.
-        c.execute("UPDATE runs SET status='cancelled', queue_pos=NULL WHERE id=?",
-                  (run_id,))
-    return {"ok": True}
+    row = db.connect().execute(
+        "SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "unknown run")
+
+    if row["status"] == "queued":
+        with db.tx() as c:
+            # Clear the queue position along with the status: the pending queue is derived
+            # from that column, and a cancelled run must drop out of it.
+            c.execute("UPDATE runs SET status='cancelled', queue_pos=NULL WHERE id=?",
+                      (run_id,))
+        return {"ok": True, "was": "queued", "stopped": True}
+
+    if row["status"] == "running":
+        if jobs.cancel_running(run_id):
+            return {"ok": True, "was": "running", "stopped": False,
+                    "detail": "stopping — the run ends at the next safe point"}
+        # Marked running in the database but no live thread owns it. That is the
+        # crashed-worker case `reap_orphans` cleans up at startup; failing it here gives
+        # the same outcome without needing a restart.
+        with db.tx() as c:
+            c.execute(
+                "UPDATE runs SET status='failed', finished_at=?, "
+                "error=COALESCE(error,'') || ? WHERE id=?",
+                (jobs._now(),
+                 "Marked running but no worker thread owns it — the process that started "
+                 "it is gone. Nothing resumes across a restart.",
+                 run_id),
+            )
+        raise HTTPException(
+            409, "this run is marked running but no worker owns it; it has been failed "
+                 "so you can re-run it")
+
+    raise HTTPException(409, f"cannot cancel a {row['status']} run")
 
 
 class QueueMoveIn(BaseModel):

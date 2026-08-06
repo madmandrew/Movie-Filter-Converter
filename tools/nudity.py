@@ -22,6 +22,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 
+import align as _align
 from align import _tool
 
 #: Classes that count as nudity worth cutting. NudeNet also emits benign classes
@@ -111,7 +112,7 @@ def extract_frames(
         args += ["-to", f"{end:.3f}"]
     args += ["-i", video, "-vf", f"fps={fps},scale={width}:-2",
              "-q:v", "4", pattern]
-    subprocess.run(args, check=True, capture_output=True)
+    _align.run_proc(args, check=True, capture_output=True)
 
     out = []
     for name in sorted(os.listdir(dest_dir)):
@@ -135,6 +136,11 @@ def detect_frames(
     found: list[Detection] = []
 
     for i, (ts, path) in enumerate(frames):
+        # Detection runs in-process like Whisper, so a cancel cannot be delivered by
+        # killing a child; check per frame instead. Deliberately outside the try below —
+        # that swallows every exception to keep one bad frame from aborting the scan,
+        # and it would swallow the cancellation too.
+        _align.check_cancelled()
         try:
             raw = det.detect(path)
         except Exception:  # noqa: BLE001 - a bad frame must not abort a long scan

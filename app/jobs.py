@@ -37,6 +37,11 @@ _current: dict = {}
 #: signal would otherwise leave a queued job sitting until the next submission.
 _IDLE_POLL = 5.0
 
+#: run_id -> id of the thread executing it. Cancelling a *running* job means reaching
+#: into the worker thread, so the request handler needs to know which thread that is.
+_running: dict[int, int] = {}
+_CANCEL_LOCK = threading.Lock()
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -66,6 +71,9 @@ def _next_queued() -> int | None:
     the position is only meaningful if the worker reads it at the moment it takes the
     next job, not at the moment the job was submitted.
     """
+    # Reads see other threads' commits because connections run in autocommit; without
+    # that the worker would keep re-reading the snapshot pinned by its first poll and the
+    # queue would look permanently empty. See `db.connect()`.
     row = connect().execute(
         "SELECT id FROM runs WHERE status='queued' "
         # queue_pos is the user's ordering; id breaks ties and orders any legacy row that
@@ -182,6 +190,8 @@ def ensure_worker() -> None:
 
 
 def _loop() -> None:
+    import align
+
     while True:
         run_id = _next_queued()
         if run_id is None:
@@ -190,11 +200,23 @@ def _loop() -> None:
             _wake.wait(_IDLE_POLL)
             _wake.clear()
             continue
+        # Publish which run this thread owns before any work starts, so a cancel arriving
+        # immediately still finds something to stop.
+        align.arm_cancel()
+        with _CANCEL_LOCK:
+            _running[run_id] = threading.get_ident()
         try:
             _execute(run_id)
+        except align.Cancelled:
+            # A deliberate stop, not a crash: no traceback, and the title is left as it
+            # was rather than marked failed.
+            _cancelled(run_id)
         except Exception:
             _fail(run_id, traceback.format_exc())
         finally:
+            with _CANCEL_LOCK:
+                _running.pop(run_id, None)
+            align.disarm_cancel()
             _current.clear()
 
 
@@ -208,10 +230,59 @@ def _log(run_id: int, msg: str) -> None:
 
 
 def _stage(run_id: int, stage: str, pct: float) -> None:
+    # Every stage transition is a cancellation checkpoint. Stages that are one long
+    # subprocess are interrupted by killing it, but the gaps between them — bookkeeping,
+    # cross-referencing, decision lookups — are pure Python, and this is what stops a
+    # cancel from having to wait for the next child process to start.
+    import align
+
+    align.check_cancelled()
     _current.update(run_id=run_id, stage=stage, pct=pct, at=_now())
     with tx() as c:
         c.execute("UPDATE runs SET stage=?, progress=?, heartbeat_at=? WHERE id=?",
                   (stage, pct, _now(), run_id))
+
+
+def cancel_running(run_id: int) -> bool:
+    """Stop a job that has already started. True if the request reached a live thread.
+
+    Returns without waiting: the worker may be inside a Whisper decode or an ffmpeg
+    encode, so the stop lands anywhere from immediately to a few seconds later. The run
+    is marked 'cancelling' meanwhile so the UI can say so rather than looking wedged.
+    """
+    import align
+
+    with _CANCEL_LOCK:
+        tid = _running.get(run_id)
+    if tid is None:
+        return False
+    if not align.request_cancel(tid):
+        return False
+    with tx() as c:
+        c.execute("UPDATE runs SET stage='cancelling', heartbeat_at=? WHERE id=?",
+                  (_now(), run_id))
+    _log(run_id, "cancellation requested — stopping at the next safe point")
+    return True
+
+
+def is_running(run_id: int) -> bool:
+    with _CANCEL_LOCK:
+        return run_id in _running
+
+
+def _cancelled(run_id: int) -> None:
+    """Record a run the user stopped. Deliberately not a failure.
+
+    The title keeps whatever status it had: a cancelled run wrote no output, so calling
+    the title 'failed' would misreport a file that is still exactly as it was.
+    """
+    with tx() as c:
+        c.execute(
+            "UPDATE runs SET status='cancelled', stage='cancelled', "
+            "finished_at=?, heartbeat_at=? WHERE id=?",
+            (_now(), _now(), run_id),
+        )
+    _log(run_id, "cancelled by the user — the file on disk was not modified")
 
 
 def _fail(run_id: int, err: str) -> None:
@@ -1155,6 +1226,17 @@ def _execute(run_id: int) -> None:
                     f"on; point the archive at a writable location in Settings"
                 )
             os.remove(out)
+        # Point of no return. The render is finished and verified non-empty, so from here
+        # the run completes even if a cancel is pending: stopping between the remove above
+        # and the replace below would leave the library with no file at all. A cancel
+        # arriving now is simply too late, which is the safe way for it to lose.
+        #
+        # Disarming is what makes that stick. The output has been written, so the run must
+        # be allowed to record its report — without this the checkpoint in `_stage("done")`
+        # would raise and a finished, rendered run would be filed as cancelled.
+        import align as _align_commit
+
+        _align_commit.disarm_cancel()
         os.replace(tmp_out, out)
 
         # A run that read the library copy under its own name has now consumed it: `out`

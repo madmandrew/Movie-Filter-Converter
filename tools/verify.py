@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 
+import align as _align
 from align import _tool, transcribe_window
 from locate import _matches, _variants, _norm, snap_to_frames
 
@@ -52,7 +53,7 @@ def render_muted(
     else:
         af = "anull"
 
-    subprocess.run(
+    _align.run_proc(
         [
             _tool("ffmpeg"), "-v", "error", "-y",
             # Filter timestamps are relative to the trimmed input, so seek with the

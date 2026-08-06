@@ -16,8 +16,134 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from functools import lru_cache
+
+
+class Cancelled(Exception):
+    """Raised when the user cancelled the run this thread is executing.
+
+    Distinct from a failure: the caller catches it to mark the run 'cancelled' rather
+    than 'failed', and to skip the error reporting a real crash gets.
+    """
+
+
+#: Per-thread cancellation state. The worker runs one job at a time on its own thread,
+#: and the flag has to be readable from the *request* thread that sets it, so it is keyed
+#: on the thread doing the work rather than passed down through every function signature —
+#: the pipeline is a dozen modules deep and threading a token through all of them would
+#: touch every call site in `tools/`.
+_CANCEL: dict[int, threading.Event] = {}
+_CHILDREN: dict[int, set] = {}
+_LOCK = threading.Lock()
+
+
+def arm_cancel(thread_id: int | None = None) -> threading.Event:
+    """Start tracking cancellation for a thread. Returns the event that requests it."""
+    tid = thread_id if thread_id is not None else threading.get_ident()
+    with _LOCK:
+        ev = _CANCEL.get(tid)
+        if ev is None:
+            ev = threading.Event()
+            _CANCEL[tid] = ev
+        _CHILDREN.setdefault(tid, set())
+    return ev
+
+
+def disarm_cancel(thread_id: int | None = None) -> None:
+    tid = thread_id if thread_id is not None else threading.get_ident()
+    with _LOCK:
+        _CANCEL.pop(tid, None)
+        _CHILDREN.pop(tid, None)
+
+
+def request_cancel(thread_id: int) -> bool:
+    """Ask the thread to stop, and kill whatever it is currently running.
+
+    Killing the child is the part that matters: every ffmpeg/ffprobe call in this
+    pipeline is a blocking `subprocess.run`, so a cooperative flag alone would not be
+    noticed until the current one returned — up to tens of minutes into a render.
+    """
+    with _LOCK:
+        ev = _CANCEL.get(thread_id)
+        if ev is None:
+            return False
+        ev.set()
+        children = list(_CHILDREN.get(thread_id, ()))
+    for proc in children:
+        try:
+            proc.kill()
+        except Exception:
+            # Already exited between the snapshot and the kill; nothing to do.
+            pass
+    return True
+
+
+def cancelled(thread_id: int | None = None) -> bool:
+    tid = thread_id if thread_id is not None else threading.get_ident()
+    with _LOCK:
+        ev = _CANCEL.get(tid)
+    return bool(ev and ev.is_set())
+
+
+def check_cancelled() -> None:
+    """Raise if this thread's run has been cancelled. Call between pipeline stages."""
+    if cancelled():
+        raise Cancelled("cancelled by the user")
+
+
+def register_child(proc) -> None:
+    """Track a process this thread started, so `request_cancel` can kill it.
+
+    For callers that need the handle themselves — streaming a child's output rather than
+    waiting on it — and so cannot go through `run_proc`.
+    """
+    with _LOCK:
+        _CHILDREN.setdefault(threading.get_ident(), set()).add(proc)
+
+
+def unregister_child(proc) -> None:
+    with _LOCK:
+        _CHILDREN.get(threading.get_ident(), set()).discard(proc)
+
+
+def run_proc(args: list[str], **kw):
+    """`subprocess.run`, but the child is killable by `request_cancel`.
+
+    Every ffmpeg/ffprobe invocation in the pipeline goes through here so that a cancel
+    can reach the process actually holding the run up.
+    """
+    check_cancelled()
+    tid = threading.get_ident()
+    # Popen rather than subprocess.run: the handle has to be registered before the wait
+    # begins, or a cancel arriving during a long encode finds nothing to kill.
+    capture = kw.pop("capture_output", False)
+    check = kw.pop("check", False)
+    timeout = kw.pop("timeout", None)
+    if capture:
+        kw.setdefault("stdout", subprocess.PIPE)
+        kw.setdefault("stderr", subprocess.PIPE)
+    proc = subprocess.Popen(args, **kw)
+    with _LOCK:
+        _CHILDREN.setdefault(tid, set()).add(proc)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    finally:
+        with _LOCK:
+            _CHILDREN.get(tid, set()).discard(proc)
+    # A killed child looks like an ordinary non-zero exit, so distinguish the two before
+    # `check` turns it into a CalledProcessError the caller would report as a crash.
+    if cancelled():
+        raise Cancelled("cancelled by the user")
+    if check and proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, args, out, err)
+    return subprocess.CompletedProcess(args, proc.returncode, out, err)
+
 
 # winget put ffmpeg on PATH but fresh shells may not see it; fall back to the
 # known install location before giving up.
@@ -42,7 +168,7 @@ def _tool(name: str) -> str:
 
 def probe_fps(video: str) -> float:
     """Real frame rate as a float. 24000/1001 -> 23.976023976..."""
-    out = subprocess.run(
+    out = run_proc(
         [
             _tool("ffprobe"), "-v", "error",
             "-select_streams", "v:0",
@@ -59,7 +185,7 @@ def probe_fps(video: str) -> float:
 
 
 def probe_duration(video: str) -> float:
-    out = subprocess.run(
+    out = run_proc(
         [
             _tool("ffprobe"), "-v", "error",
             "-show_entries", "format=duration",
@@ -81,7 +207,7 @@ def extract_audio(video: str, start: float, end: float, dest: str | None = None)
         fd, dest = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
     start = max(0.0, start)
-    subprocess.run(
+    run_proc(
         [
             _tool("ffmpeg"), "-v", "error", "-y",
             "-ss", f"{start:.3f}",

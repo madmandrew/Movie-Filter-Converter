@@ -158,7 +158,15 @@ def connect() -> sqlite3.Connection:
     if conn is None:
         path = db_path()
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        conn = sqlite3.connect(path, timeout=30, check_same_thread=False)
+        # isolation_level=None puts the connection in autocommit, so a bare SELECT does
+        # NOT open a deferred transaction. That matters because connections are per-thread
+        # and long-lived: with the default isolation, the first SELECT pins a read
+        # snapshot that is only released on commit/rollback, so a thread that mostly reads
+        # (the job worker polling the queue, a request handler serving the run list) goes
+        # on seeing the database as it was at its first query and never observes another
+        # thread's writes. Writers still get atomicity — `tx()` issues an explicit BEGIN.
+        conn = sqlite3.connect(path, timeout=30, check_same_thread=False,
+                               isolation_level=None)
         conn.row_factory = sqlite3.Row
         # WAL lets the worker write progress while requests read it.
         conn.execute("PRAGMA journal_mode=WAL")
@@ -208,7 +216,18 @@ def init() -> None:
 
 @contextmanager
 def tx():
+    """A write transaction. Every statement inside commits or rolls back together.
+
+    The BEGIN is explicit because the connection runs in autocommit (see `connect()`),
+    where each statement would otherwise commit on its own — which would let a multi-row
+    write like renumbering the job queue be observed half-applied.
+
+    BEGIN IMMEDIATE takes the write lock up front rather than on the first write. Two
+    threads that both started deferred and then tried to upgrade would deadlock, and one
+    of them would come back as "database is locked" after the 30s timeout.
+    """
     conn = connect()
+    conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
         conn.commit()
