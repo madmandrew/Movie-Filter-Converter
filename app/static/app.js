@@ -1151,7 +1151,17 @@ async function loadLive() {
     };
   });
 
-  $('#livebody').innerHTML = d.runs.map((r) => {
+  // Newest-first is right for finished runs but backwards for the queue: the job about
+  // to run should read first. Queued runs are lifted out and shown in queue order, ahead
+  // of everything else, so "what runs next" is the top of the list rather than something
+  // to work out from the id order.
+  const queued = d.runs.filter((r) => r.status === 'queued')
+    .sort((a, b) => (a.queue_position || 0) - (b.queue_position || 0));
+  const rest = d.runs.filter((r) => r.status !== 'queued');
+  const ordered = [...rest.filter((r) => r.status === 'running'), ...queued,
+    ...rest.filter((r) => r.status !== 'running')];
+
+  $('#livebody').innerHTML = ordered.map((r) => {
     const pct = Math.round(r.progress);
     const cls = { done: 'ok', failed: 'bad', running: 'warn' }[r.status] || '';
     const open = liveOpen.has(String(r.id));
@@ -1164,6 +1174,20 @@ async function loadLive() {
       : (r.status === 'running'
           ? `<span class="muted">last activity ${humanAge(r.seconds_since_heartbeat)} ago</span>`
           : '');
+    // Queue controls, only for runs that have not started. A running job is mid-write in
+    // ffmpeg/Whisper and cannot be displaced, so it gets no buttons — the same reason it
+    // cannot be cancelled.
+    const q = r.status === 'queued' && r.queue_position
+      ? `<span class="muted" title="Position in the queue">#${r.queue_position} of
+           ${r.queue_length} in line</span>
+         <button class="secondary qmove" data-id="${r.id}" data-to="front"
+           title="Run this next" ${r.queue_position === 1 ? 'disabled' : ''}>⇈ Next</button>
+         <button class="secondary qmove" data-id="${r.id}" data-to="up"
+           title="Move up one place" ${r.queue_position === 1 ? 'disabled' : ''}>↑</button>
+         <button class="secondary qmove" data-id="${r.id}" data-to="down"
+           title="Move down one place"
+           ${r.queue_position === r.queue_length ? 'disabled' : ''}>↓</button>`
+      : '';
     return `<fieldset class="liverun">
       <legend>#${r.id} — ${esc(r.name)}</legend>
       <div class="toolbar">
@@ -1174,6 +1198,7 @@ async function loadLive() {
         ${r.elapsed != null
           ? `<span class="muted">running ${humanAge(r.elapsed)}</span>` : ''}
         ${stall}
+        ${q}
         <button class="secondary livetoggle" data-id="${r.id}"
           style="margin-left:auto">${open ? 'Hide log' : 'Show log'}</button>
         <button class="secondary livecopy" data-id="${r.id}"
@@ -1193,6 +1218,25 @@ async function loadLive() {
     const id = String(b.dataset.id);
     if (liveOpen.has(id)) liveOpen.delete(id); else liveOpen.add(id);
     loadLive();
+  }));
+
+  // Scoped to the live view: the runs table renders the same buttons and binds its own
+  // handler, and an unscoped selector would bind both to every button.
+  $$('#livebody .qmove').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      const r = await postJSON(`/api/runs/${b.dataset.id}/move`,
+        { to: b.dataset.to });
+      await loadLive();
+      toast(`Run #${b.dataset.id} is now #${r.position} of ${r.order.length} in line`);
+    } catch (e) {
+      b.disabled = false;
+      // A 409 here is the normal race, not a bug: the queue moved on between the page
+      // rendering and the click, usually because the job started. Re-poll so the buttons
+      // match reality rather than leaving a stale row on screen.
+      toast(e.message, 'error');
+      loadLive();
+    }
   }));
 
   $$('.livecopy').forEach((b) => b.addEventListener('click', async () => {
@@ -1245,12 +1289,24 @@ async function loadRuns() {
     return `<tr>
       <td class="num">${r.id}</td>
       <td class="name" title="${esc(r.path)}">${esc(r.path.split(/[\\/]/).pop())}</td>
-      <td><span class="pill ${cls}">${esc(r.status)}</span></td>
+      <td><span class="pill ${cls}">${esc(r.status)}</span>
+        ${r.queue_position
+          ? `<span class="muted" title="Position in the queue">${r.queue_position}/${r.queue_length}</span>`
+          : ''}</td>
       <td class="muted">${esc(r.stage || '')}</td>
       <td><div class="bar"><i style="width:${pct}%"></i></div></td>
       <td><button class="secondary rundet" data-id="${r.id}">Details</button>
         ${r.status === 'queued'
-          ? `<button class="secondary runcancel" data-id="${r.id}">Cancel</button>` : ''}
+          ? `<button class="secondary qmove" data-id="${r.id}" data-to="front"
+               title="Run this next"
+               ${r.queue_position === 1 ? 'disabled' : ''}>⇈ Next</button>
+             <button class="secondary qmove" data-id="${r.id}" data-to="up"
+               title="Move up one place"
+               ${r.queue_position === 1 ? 'disabled' : ''}>↑</button>
+             <button class="secondary qmove" data-id="${r.id}" data-to="down"
+               title="Move down one place"
+               ${r.queue_position === r.queue_length ? 'disabled' : ''}>↓</button>
+             <button class="secondary runcancel" data-id="${r.id}">Cancel</button>` : ''}
         ${['done', 'failed', 'cancelled'].includes(r.status)
           ? `<button class="secondary runedit" data-id="${r.id}"
                title="Reopen these settings to adjust and re-run">Edit &amp; re-run</button>`
@@ -1267,6 +1323,18 @@ async function loadRuns() {
       await postJSON(`/api/runs/${b.dataset.id}/cancel`, {});
       loadRuns();
     } catch (e) { toast(e.message, 'error'); }
+  }));
+  // Re-prioritise a pending run. Same handler shape as the live view; this table is not
+  // auto-refreshed, so it reloads explicitly.
+  $$('#runs .qmove').forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      const r = await postJSON(`/api/runs/${b.dataset.id}/move`, { to: b.dataset.to });
+      toast(`Run #${b.dataset.id} is now #${r.position} of ${r.order.length} in line`);
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    loadRuns();
   }));
 }
 

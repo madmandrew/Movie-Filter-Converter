@@ -12,6 +12,7 @@ import json
 import os
 import sys
 from contextlib import asynccontextmanager
+from typing import Literal
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
@@ -1101,6 +1102,10 @@ def api_runs_live(tail: int = 60):
             parsed = parsed.replace(tzinfo=timezone.utc)
         return round((now - parsed).total_seconds(), 1)
 
+    # Position in line for the queued rows, so the live view can show and re-order them.
+    order = jobs.queued_order()
+    place = {rid: n for n, rid in enumerate(order, start=1)}
+
     out = []
     for r in rows:
         lines = (r["log"] or "").strip().splitlines()
@@ -1122,6 +1127,8 @@ def api_runs_live(tail: int = 60):
             "seconds_since_heartbeat": since,
             "stalled": bool(r["status"] == "running" and since
                             and since > STALL_SECONDS),
+            "queue_position": place.get(r["id"]),
+            "queue_length": len(order),
             "log_tail": lines[-tail:],
             "log_lines": len(lines),
             "error": (r["error"] or "").strip().splitlines()[-1:] or None,
@@ -1157,7 +1164,18 @@ def api_runs(limit: int = 50):
         "SELECT id,path,status,stage,progress,created_at,finished_at,error "
         "FROM runs ORDER BY id DESC LIMIT ?", (limit,)
     ).fetchall()
-    return {"runs": [dict(r) for r in rows], "current": jobs.current()}
+    # Where each pending run sits in line. Sent as a 1-based position rather than the raw
+    # queue_pos so the UI does not have to know that the column has gaps, and so "3 of 11"
+    # is directly displayable.
+    order = jobs.queued_order()
+    place = {rid: n for n, rid in enumerate(order, start=1)}
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["queue_position"] = place.get(r["id"])
+        d["queue_length"] = len(order)
+        out.append(d)
+    return {"runs": out, "current": jobs.current(), "queue_order": order}
 
 
 @app.get("/api/runs/{run_id}")
@@ -1234,8 +1252,38 @@ def api_cancel(run_id: int):
             raise HTTPException(404, "unknown run")
         if row["status"] != "queued":
             raise HTTPException(409, f"cannot cancel a {row['status']} run")
-        c.execute("UPDATE runs SET status='cancelled' WHERE id=?", (run_id,))
+        # Clear the queue position along with the status: the pending queue is derived
+        # from that column, and a cancelled run must drop out of it.
+        c.execute("UPDATE runs SET status='cancelled', queue_pos=NULL WHERE id=?",
+                  (run_id,))
     return {"ok": True}
+
+
+class QueueMoveIn(BaseModel):
+    #: 'front' jumps the whole queue; 'up'/'down' swap with the neighbour. Front exists
+    #: because the case this is for is a job stuck behind ten others.
+    to: Literal["up", "down", "front"]
+
+
+@app.post("/api/runs/{run_id}/move")
+def api_move(run_id: int, body: QueueMoveIn):
+    """Re-prioritise a queued run.
+
+    Only pending runs can move. The job already running is mid-write in ffmpeg or Whisper
+    and cannot be displaced — the same reason it cannot be cancelled.
+    """
+    try:
+        if body.to == "front":
+            order = jobs.move_to_front(run_id)
+        else:
+            order = jobs.reorder(run_id, body.to)
+    except LookupError:
+        row = db.connect().execute(
+            "SELECT status FROM runs WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "unknown run") from None
+        raise HTTPException(409, f"cannot re-order a {row['status']} run") from None
+    return {"ok": True, "order": order, "position": order.index(run_id) + 1}
 
 
 # --------------------------------------------------------------------- review

@@ -49,7 +49,12 @@ CREATE TABLE IF NOT EXISTS runs (
     finished_at  TEXT,
     -- When the stage/progress last moved. Without this a hung job is indistinguishable
     -- from a slow one: both show the same stage and percentage indefinitely.
-    heartbeat_at TEXT
+    heartbeat_at TEXT,
+    -- Position in the pending queue, 1 = next to run. The worker reads this at the moment
+    -- it takes the next job, so the user can re-prioritise a job sitting behind others.
+    -- NULL once the run leaves the queue, and on rows predating this column (ordered by
+    -- id in that case, which is the submission order they were run in).
+    queue_pos    INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
 
@@ -167,6 +172,16 @@ def connect() -> sqlite3.Connection:
 #: destructive, so an older database keeps working.
 _MIGRATIONS = (
     ("runs", "heartbeat_at", "TEXT"),
+    ("runs", "queue_pos", "INTEGER"),
+)
+
+
+#: Indexes over migrated columns. These cannot live in SCHEMA: `CREATE TABLE IF NOT
+#: EXISTS` is a no-op on an existing database, so the column only appears once _migrate()
+#: has ALTERed it in — and a CREATE INDEX naming it in the same script fails outright,
+#: taking the whole startup with it.
+_POST_MIGRATE_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS idx_runs_queue ON runs(status, queue_pos)",
 )
 
 
@@ -175,6 +190,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+    for stmt in _POST_MIGRATE_INDEXES:
+        conn.execute(stmt)
 
 
 def init() -> None:

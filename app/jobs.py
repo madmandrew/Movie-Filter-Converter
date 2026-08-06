@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import os
-import queue
 import sys
 import threading
 import traceback
@@ -29,9 +28,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(_HERE), "tools"))
 
 from db import connect, tx  # noqa: E402
 
-_Q: "queue.Queue[int]" = queue.Queue()
+#: Signalled whenever a job is queued, so the idle worker wakes without polling.
+_wake = threading.Event()
 _worker: threading.Thread | None = None
 _current: dict = {}
+
+#: How long the worker waits for `_wake` before looking at the queue anyway. A missed
+#: signal would otherwise leave a queued job sitting until the next submission.
+_IDLE_POLL = 5.0
 
 
 def _now() -> str:
@@ -41,14 +45,86 @@ def _now() -> str:
 def enqueue(path: str, options: dict) -> int:
     with tx() as c:
         cur = c.execute(
-            "INSERT INTO runs(path, status, stage, options_json, created_at) "
-            "VALUES (?,'queued','waiting',?,?)",
+            "INSERT INTO runs(path, status, stage, options_json, created_at, queue_pos) "
+            "VALUES (?,'queued','waiting',?,?,"
+            # Append to the back of the queue. COALESCE covers the empty-queue case and
+            # rows from before this column existed, whose queue_pos is NULL.
+            "  (SELECT COALESCE(MAX(queue_pos), 0) + 1 FROM runs WHERE status='queued'))",
             (path, json.dumps(options), _now()),
         )
         run_id = cur.lastrowid
-    _Q.put(run_id)
     ensure_worker()
+    _wake.set()
     return run_id
+
+
+def _next_queued() -> int | None:
+    """The run the worker should pick up, or None if the queue is empty.
+
+    Order comes from the database rather than an in-memory FIFO, because the user can
+    re-order the queue between submissions and that ordering has to survive a restart —
+    the position is only meaningful if the worker reads it at the moment it takes the
+    next job, not at the moment the job was submitted.
+    """
+    row = connect().execute(
+        "SELECT id FROM runs WHERE status='queued' "
+        # queue_pos is the user's ordering; id breaks ties and orders any legacy row that
+        # never got a position, keeping submission order as the fallback.
+        "ORDER BY COALESCE(queue_pos, id), id LIMIT 1"
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def reorder(run_id: int, direction: str) -> list[int]:
+    """Move a queued run one place towards the front ('up') or back ('down').
+
+    Moving at either end is a no-op rather than an error: the buttons are disabled there,
+    but the page polls every two seconds and the queue can shift under a click.
+
+    The job currently running is not in this list and cannot be displaced — it is already
+    mid-write in ffmpeg or Whisper, the same reason it cannot be cancelled.
+    """
+    if direction not in ("up", "down"):
+        raise ValueError(f"unknown direction {direction!r}")
+    with tx() as c:
+        rows = c.execute(
+            "SELECT id, queue_pos FROM runs WHERE status='queued' "
+            "ORDER BY COALESCE(queue_pos, id), id"
+        ).fetchall()
+        order = [r["id"] for r in rows]
+        if run_id not in order:
+            raise LookupError(f"run {run_id} is not queued")
+        i = order.index(run_id)
+        j = i - 1 if direction == "up" else i + 1
+        if 0 <= j < len(order):
+            order[i], order[j] = order[j], order[i]
+        # Renumber the whole queue from 1. Positions may be NULL or have gaps from
+        # cancellations, and a swap of two stored values cannot express a move when one
+        # side has no position at all.
+        for pos, rid in enumerate(order, start=1):
+            c.execute("UPDATE runs SET queue_pos=? WHERE id=?", (pos, rid))
+    return order
+
+
+def move_to_front(run_id: int) -> list[int]:
+    """Put a queued run at the head of the queue, keeping the rest in order.
+
+    The reason this exists alongside `reorder`: the case that prompted it was a job sitting
+    behind ten others, which is ten clicks of "up" and ten round-trips through the poll.
+    """
+    with tx() as c:
+        rows = c.execute(
+            "SELECT id FROM runs WHERE status='queued' "
+            "ORDER BY COALESCE(queue_pos, id), id"
+        ).fetchall()
+        order = [r["id"] for r in rows]
+        if run_id not in order:
+            raise LookupError(f"run {run_id} is not queued")
+        order.remove(run_id)
+        order.insert(0, run_id)
+        for pos, rid in enumerate(order, start=1):
+            c.execute("UPDATE runs SET queue_pos=? WHERE id=?", (pos, rid))
+    return order
 
 
 def reap_orphans() -> tuple[int, int]:
@@ -78,19 +154,22 @@ def reap_orphans() -> tuple[int, int]:
                 "error = COALESCE(error,'') || ? WHERE id=?",
                 (_now(), note, r["id"]),
             )
-        # Oldest first, so the queue keeps the order the user submitted in.
+        # In queue order, so a re-ordering the user made before the restart survives it;
+        # id is the tie-break, which keeps submission order for anything never moved.
         queued = c.execute(
-            "SELECT id FROM runs WHERE status='queued' ORDER BY id").fetchall()
-        for r in queued:
+            "SELECT id FROM runs WHERE status='queued' "
+            "ORDER BY COALESCE(queue_pos, id), id").fetchall()
+        for pos, r in enumerate(queued, start=1):
             c.execute(
-                "UPDATE runs SET stage='waiting', progress=0, heartbeat_at=? WHERE id=?",
-                (_now(), r["id"]),
+                "UPDATE runs SET stage='waiting', progress=0, heartbeat_at=?, "
+                "queue_pos=? WHERE id=?",
+                (_now(), pos, r["id"]),
             )
 
-    # Re-enqueue outside the transaction: the worker starts consuming as soon as an id
-    # lands on the queue, and it opens its own connection.
-    for r in queued:
-        _Q.put(r["id"])
+    # Nothing to re-enqueue: the worker takes its next job straight from the database, so
+    # a queued row is already all the state it needs. Just make sure it is awake.
+    if queued:
+        _wake.set()
 
     return len(running), len(queued)
 
@@ -104,13 +183,18 @@ def ensure_worker() -> None:
 
 def _loop() -> None:
     while True:
-        run_id = _Q.get()
+        run_id = _next_queued()
+        if run_id is None:
+            # Idle. Wait to be signalled, but time out so a signal lost between the check
+            # above and the wait below cannot strand a queued job.
+            _wake.wait(_IDLE_POLL)
+            _wake.clear()
+            continue
         try:
             _execute(run_id)
         except Exception:
             _fail(run_id, traceback.format_exc())
         finally:
-            _Q.task_done()
             _current.clear()
 
 
@@ -156,13 +240,27 @@ def worker_alive() -> bool:
 
 
 def queue_depth() -> int:
-    return _Q.qsize()
+    row = connect().execute(
+        "SELECT COUNT(*) AS n FROM runs WHERE status='queued'").fetchone()
+    return row["n"] if row else 0
+
+
+def queued_order() -> list[int]:
+    """Queued run ids, front of the queue first."""
+    return [r["id"] for r in connect().execute(
+        "SELECT id FROM runs WHERE status='queued' "
+        "ORDER BY COALESCE(queue_pos, id), id").fetchall()]
 
 
 def _execute(run_id: int) -> None:
     conn = connect()
     run = conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-    if run is None or run["status"] == "cancelled":
+    if run is None or run["status"] != "queued":
+        # Cancelled between being selected and being read. Drop the queue position so the
+        # row cannot be selected again: the worker takes its next job by querying for
+        # queued rows, so a row left in the queue with a non-queued status would spin.
+        with tx() as c:
+            c.execute("UPDATE runs SET queue_pos=NULL WHERE id=?", (run_id,))
         return
     path = run["path"]
     # The title's identity in the library, kept separate from the file actually being
@@ -172,8 +270,11 @@ def _execute(run_id: int) -> None:
     opts = json.loads(run["options_json"] or "{}")
 
     with tx() as c:
-        c.execute("UPDATE runs SET status='running', started_at=? WHERE id=?",
-                  (_now(), run_id))
+        # Clearing queue_pos is what takes the run out of the queue. Status alone would
+        # do for the worker's own SELECT, but the queue the user re-orders is derived from
+        # the same column and a started job must not still appear in it.
+        c.execute("UPDATE runs SET status='running', started_at=?, queue_pos=NULL "
+                  "WHERE id=?", (_now(), run_id))
 
     from align import get_model, probe_duration, probe_fps
     from locate import locate, snap_to_frames
