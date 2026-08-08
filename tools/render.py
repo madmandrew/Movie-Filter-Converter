@@ -48,8 +48,11 @@ def _run(args: list[str]) -> None:
 #:   libx264 slow            127.3 s  = 0.47x realtime, 70.4 MB   <- unusable
 #: Pascal-generation NVENC should land in the same order of magnitude as QSV.
 #:
-#: Note: Pascal (10-series) NVENC does **not** support HEVC 10-bit B-frames and has no
-#: AV1 encoder, but for 8-bit H.264/HEVC re-encodes it is fine.
+#: Note: Pascal (10-series) NVENC **cannot encode HEVC 10-bit at all** (decode is fine)
+#: and has no AV1 encoder, but for 8-bit H.264/HEVC re-encodes it is fine. That is why
+#: `_encoder_works` probes at the source's real pixel format and why a 10-bit HEVC source
+#: is allowed to fall back to an 8-bit hardware encode: the alternative measured 0.31x
+#: realtime on the Unraid box, i.e. 2.5 hours for a 47-minute episode.
 _HW_CANDIDATES = {
     "h264": [
         (["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "20",
@@ -68,12 +71,21 @@ _HW_CANDIDATES = {
 _encoder_cache: dict[str, list[str]] = {}
 
 
-def _encoder_works(args: list[str]) -> bool:
-    """Try a 12-frame encode of colour bars. Cheap, and catches driver mismatches."""
+def _encoder_works(args: list[str], pix_fmt: str = "yuv420p") -> bool:
+    """Try a short encode of colour bars. Cheap, and catches driver mismatches.
+
+    `pix_fmt` must match the source being encoded. Probing 8-bit and then encoding a
+    10-bit file is a false positive in exactly the way a load-only CUDA probe is: Pascal
+    NVENC advertises `hevc_nvenc` and encodes 8-bit happily, but **cannot encode HEVC
+    10-bit at all**. The 8-bit probe passed, the real encode then fell back to software
+    x265 at ~0.3x realtime, and nothing said so — a 47-minute episode became a
+    2.5-hour render that looked like a hang.
+    """
     try:
         _align.run_proc(
             [_tool("ffmpeg"), "-v", "error", "-y",
-             "-f", "lavfi", "-i", "testsrc=size=640x360:rate=24:duration=0.5",
+             "-f", "lavfi",
+             "-i", f"testsrc=size=640x360:rate=24:duration=0.5,format={pix_fmt}",
              *args, "-f", "null", os.devnull],
             check=True, capture_output=True, timeout=60,
         )
@@ -92,31 +104,74 @@ def _video_encoder(src: str, prefer_hw: bool = True) -> list[str]:
     Keeps the source codec family: an HEVC source stays HEVC rather than being
     silently downgraded to H.264.
     """
-    codec_out = _align.run_proc(
+    probe = _align.run_proc(
         [_tool("ffprobe"), "-v", "error", "-select_streams", "v:0",
-         "-show_entries", "stream=codec_name", "-of", "csv=p=0", "--", src],
+         "-show_entries", "stream=codec_name,pix_fmt", "-of", "csv=p=0", "--", src],
         capture_output=True, text=True,
     ).stdout.strip().splitlines()
-    codec = (codec_out[0] if codec_out else "h264").lower()
+    fields = (probe[0].split(",") if probe else [])
+    codec = (fields[0] if fields else "h264").lower()
+    pix_fmt = (fields[1] if len(fields) > 1 else "yuv420p").lower()
     family = "hevc" if codec in ("hevc", "h265") else "h264"
+    # 10-bit is the case that breaks hardware encoding on older cards, so it decides both
+    # what the probe encodes and which candidates are eligible at all.
+    ten_bit = "10" in pix_fmt
 
-    if family in _encoder_cache:
-        return _encoder_cache[family]
+    key = f"{family}/{pix_fmt}"
+    if key in _encoder_cache:
+        return _encoder_cache[key]
 
     chosen = None
+    chosen_name = None
+    # Preserving bit depth is preferred, but a hardware encoder that only does 8-bit still
+    # beats software by 3-10x. Try same-family first, then cross-family (HEVC 10-bit ->
+    # H.264 8-bit on Pascal), and only then give up on hardware.
+    ladder = list(_HW_CANDIDATES.get(family, []))
+    if ten_bit and family == "hevc":
+        ladder += _HW_CANDIDATES.get("h264", [])
+
     if prefer_hw:
-        for args, _name in _HW_CANDIDATES.get(family, []):
-            if _encoder_works(args):
-                chosen = args + ["-pix_fmt", "yuv420p"]
+        for args, name in ladder:
+            # Probe at the source's real depth. An 8-bit-only encoder fails here rather
+            # than passing and then falling over on the actual file.
+            if _encoder_works(args, pix_fmt):
+                chosen, chosen_name = args + ["-pix_fmt", pix_fmt], name
+                break
+            # Retry 8-bit: the encoder may be usable if the frames are converted down.
+            # That is a real quality decision (10-bit -> 8-bit can band gradients), so it
+            # is only taken because the alternative is software at a fraction of realtime.
+            if ten_bit and _encoder_works(args, "yuv420p"):
+                chosen, chosen_name = args + ["-pix_fmt", "yuv420p"], f"{name} (8-bit)"
                 break
 
     if chosen is None:
         # `veryfast` at crf 18 is the sensible software fallback: 2.35x realtime and
         # visually fine for content that is mostly being cut, not archived.
-        sw = "libx265" if family == "hevc" else "libx264"
-        chosen = ["-c:v", sw, "-preset", "veryfast", "-crf", "18"]
+        #
+        # x265 is ~3x slower than x264 and, on a 10-bit HEVC source, x264 at 10-bit
+        # measures *better* per unit of encode time. Measured on 20s of the real
+        # Severance S02E05 (Main 10, yuv420p10le), PSNR/SSIM vs. the source:
+        #   libx265 veryfast        1.36x realtime  2.02 MB  PSNR 57.07  SSIM 0.99898
+        #   libx264 veryfast 10-bit 3.61x realtime  3.32 MB  PSNR 53.09  SSIM 0.99794
+        #   libx264 veryfast  8-bit 4.04x realtime  5.06 MB  PSNR 50.92  SSIM 0.99513
+        # x265 wins on quality-per-byte, but 1.36x realtime means ~35 min/episode of
+        # pure CPU. x264 10-bit keeps the bit depth, is ~2.7x faster, and the quality gap
+        # is far above the visually-lossless threshold. Prefer it, but keep x265 when the
+        # caller explicitly wants size over speed.
+        if family == "hevc" and ten_bit:
+            sw, extra = "libx264", ["-pix_fmt", pix_fmt]
+        elif family == "hevc":
+            sw, extra = "libx265", []
+        else:
+            sw, extra = "libx264", []
+        chosen = ["-c:v", sw, "-preset", "veryfast", "-crf", "18"] + extra
+        chosen_name = f"{sw} veryfast (software)"
 
-    _encoder_cache[family] = chosen
+    # Say which encoder won. A silent software fallback is indistinguishable from a hang:
+    # it turned a ~6-minute render into ~2.5 hours with nothing in the log to explain it,
+    # and the only symptom was a .partial file growing slowly.
+    print(f"[render] video encoder: {chosen_name} for {codec} {pix_fmt}", flush=True)
+    _encoder_cache[key] = chosen
     return chosen
 
 
