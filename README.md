@@ -55,8 +55,12 @@ or an unfiltered one with Atmos.
 ## Running it
 
 ```bash
-docker compose up -d          # then open http://<host>:8080
+docker compose up -d          # local dev; then open http://<host>:8080
 ```
+
+Deploying to the Unraid server uses `docker-compose.deploy.yml`, which publishes **8181**
+rather than 8080 — qBittorrent already owns 8080 there, and the collision fails at `up`.
+The live instance is `http://192.168.50.31:8181`.
 
 Or directly:
 

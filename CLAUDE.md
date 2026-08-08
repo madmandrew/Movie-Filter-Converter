@@ -97,8 +97,12 @@ behaviour.
 
 ## Commands
 
+The **deployed instance is `http://192.168.50.31:8181`** (`docker-compose.deploy.yml`) —
+not 8080, which qBittorrent owns on that server. `/api/health` reports the device Whisper
+actually got; query it rather than inferring the device from run timings.
+
 ```
-docker compose up -d                     # deploy (port 8080 -> 8000)
+docker compose up -d                     # local dev (port 8080 -> 8000)
 uvicorn app.main:app --reload            # local dev, needs PYTHONPATH=tools:app
 .venv/Scripts/python.exe tools/run_filter.py <video> <tagset.json> --out out.mkv
 .venv/Scripts/python.exe tools/run_cut.py  <video> <out.mp4>
