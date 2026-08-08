@@ -785,6 +785,103 @@ def api_tagset(tag_set_id: int):
             "groups": sorted(groups.values(), key=lambda g: g["title"])}
 
 
+# -------------------------------------------------------------- timeline offset
+
+#: Two credits anchors measuring offsets further apart than this mean the drift is not
+#: constant across the title, so no single offset can serve the whole file. Chosen to sit
+#: above ordinary marker imprecision (a second or two of judgement about where credits
+#: "start") and below the scale of a real structural difference — a missing recap or an
+#: extra ad break moves things by tens of seconds.
+ANCHOR_DISAGREE_TOLERANCE = 5.0
+
+
+class OffsetIn(BaseModel):
+    """One or two credits anchors, each pairing the tag-set's time with the real one."""
+    path: str
+    tag_set_id: int | None = None
+    #: [{"tagged": 3054.0, "actual": 2961.0, "label": "closing credits"}, …]
+    anchors: list[dict] = []
+    #: Persist the derived offset on the title. False just computes and returns it.
+    save: bool = True
+
+
+@app.post("/api/titles/offset")
+def api_set_offset(body: OffsetIn):
+    """Derive a source-to-file offset from credits markers aligned by hand.
+
+    The audio-derived estimate fails outright when a tag-set's drift is not constant —
+    it reports "no reliable offset" and tagged video cuts are then refused, because a
+    video range cannot be located in the file the way a spoken word can. A structural
+    marker is something the user *can* read off the file directly, and it drifts far less
+    than a 6-second-bucketed word tag, so it makes a much better anchor.
+    """
+    if not library.within_roots(body.path):
+        raise HTTPException(403, "path is outside the configured library roots")
+    if not body.anchors:
+        raise HTTPException(400, "provide at least one anchor")
+
+    measured = []
+    for a in body.anchors:
+        try:
+            tagged = float(a["tagged"])
+            actual = float(a["actual"])
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(400, "each anchor needs numeric 'tagged' and 'actual'")
+        if actual < 0:
+            raise HTTPException(400, "the observed time cannot be negative")
+        measured.append({
+            "label": str(a.get("label") or "anchor"),
+            "tagged": tagged, "actual": actual,
+            # The offset is what must be ADDED to a tag-set time to reach the file's own
+            # timeline, matching how `tag_offset` is applied throughout jobs.py
+            # (`inc.start_approx + tag_offset`). Andrew's worked example: credits tagged
+            # at 50:54 that really start at 49:21 give -93s.
+            "offset": round(actual - tagged, 3),
+        })
+
+    offsets = [m["offset"] for m in measured]
+    spread = max(offsets) - min(offsets) if len(offsets) > 1 else 0.0
+    # Average the anchors. With one it is that anchor; with two it splits the difference,
+    # which is the best single answer available when drift varies across the title.
+    offset = round(sum(offsets) / len(offsets), 3)
+
+    warning = None
+    if spread > ANCHOR_DISAGREE_TOLERANCE:
+        # This is the signal that one offset cannot serve the whole file — exactly the
+        # condition that made the audio estimator give up. Surfaced rather than silently
+        # averaged away, because a cut near one end of the title would be better served by
+        # that end's own anchor.
+        detail = ", ".join(f"{m['label']} {m['offset']:+.1f}s" for m in measured)
+        warning = (
+            f"The anchors disagree by {spread:.1f}s ({detail}), so the "
+            f"drift is not constant across this title and no single offset fits it. "
+            f"Using the average ({offset:+.1f}s) — expect cuts far from either anchor to "
+            f"be off by up to {spread / 2:.1f}s. For an accurate cut, anchor on the "
+            f"credits marker nearest it, or place the cut manually."
+        )
+
+    if body.save:
+        if not body.tag_set_id:
+            raise HTTPException(400, "saving an offset needs the tag_set_id it was "
+                                     "measured against")
+        db.set_manual_offset(body.path, body.tag_set_id, offset)
+
+    return {"offset": offset, "anchors": measured, "spread": round(spread, 3),
+            "warning": warning, "saved": bool(body.save)}
+
+
+@app.get("/api/titles/offset")
+def api_get_offset(path: str, tag_set_id: int | None = None):
+    """The saved offset for a title, if one was measured against this tag-set."""
+    return {"offset": db.get_manual_offset(path, tag_set_id)}
+
+
+@app.delete("/api/titles/offset")
+def api_clear_offset(path: str):
+    db.set_manual_offset(path, None, None)
+    return {"ok": True}
+
+
 # ------------------------------------------------------------------ word list
 
 @app.get("/api/words")
@@ -861,6 +958,14 @@ class RunIn(BaseModel):
     #: incidents describing a conversation rather than a word, where there is nothing for
     #: Whisper to find, and as an escape hatch when a word genuinely is not located.
     trust_timestamps: bool = False
+    #: A hand-measured source-to-file offset in seconds, normally derived from a credits
+    #: marker (see `/api/titles/offset`). Overrides the audio-derived estimate and, unlike
+    #: it, counts as a verified timeline — so tagged video cuts are applied rather than
+    #: refused. Null falls back to any offset saved on the title for this tag-set, and
+    #: then to the estimator.
+    manual_offset: float | None = None
+    #: Persist `manual_offset` on the title so later runs reuse it without re-measuring.
+    save_offset: bool = True
     words: list[str] | None = None
     #: Words to mute on sight, with no review step. Every scan hit for these is muted
     #: directly rather than joining the pending-review queue — "just filter out any
@@ -949,6 +1054,13 @@ def api_run(body: RunIn):
         opts["output_path"] = body.path
     if not opts["archive_path"]:
         opts["archive_path"] = library.archive_path_for(body.path)
+
+    # Remember a hand-measured offset so the next run for this title does not have to
+    # re-derive it. Keyed to the tag-set it was measured against — see
+    # `db.get_manual_offset`, which refuses to hand back an offset belonging to a
+    # different cut.
+    if body.save_offset and body.manual_offset is not None and body.tag_set_id:
+        db.set_manual_offset(body.path, body.tag_set_id, body.manual_offset)
 
     run_id = jobs.enqueue(body.path, opts)
     return {"run_id": run_id}

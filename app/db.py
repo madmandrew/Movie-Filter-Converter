@@ -181,6 +181,11 @@ def connect() -> sqlite3.Connection:
 _MIGRATIONS = (
     ("runs", "heartbeat_at", "TEXT"),
     ("runs", "queue_pos", "INTEGER"),
+    # A hand-measured source-to-file offset, in seconds, and the tag-set it was measured
+    # against. Both columns or neither: an offset is only meaningful for the cut it was
+    # derived from, so switching tag-sets must not silently reuse the old number.
+    ("titles", "manual_offset", "REAL"),
+    ("titles", "manual_offset_tag_set_id", "INTEGER"),
 )
 
 
@@ -247,6 +252,37 @@ def set_setting(key: str, value) -> None:
             "INSERT INTO settings(key,value) VALUES (?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, json.dumps(value)),
+        )
+
+
+def get_manual_offset(path: str, tag_set_id: int | None) -> float | None:
+    """The hand-measured offset for this title, if one was saved for this tag-set.
+
+    Returns None when the stored offset belongs to a *different* tag-set. An offset is
+    measured against one particular cut, so reusing it for another tag-set would apply a
+    correction derived from a timeline that has nothing to do with the new one.
+    """
+    if tag_set_id is None:
+        return None
+    row = connect().execute(
+        "SELECT manual_offset, manual_offset_tag_set_id FROM titles WHERE path=?",
+        (path,),
+    ).fetchone()
+    if not row or row["manual_offset"] is None:
+        return None
+    if row["manual_offset_tag_set_id"] != tag_set_id:
+        return None
+    return float(row["manual_offset"])
+
+
+def set_manual_offset(path: str, tag_set_id: int | None, offset: float | None) -> None:
+    """Store (or clear, with offset=None) the hand-measured offset for a title."""
+    with tx() as c:
+        c.execute(
+            "UPDATE titles SET manual_offset=?, manual_offset_tag_set_id=? WHERE path=?",
+            (None if offset is None else float(offset),
+             None if offset is None else tag_set_id,
+             path),
         )
 
 

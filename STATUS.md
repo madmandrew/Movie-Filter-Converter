@@ -296,6 +296,18 @@ precisely), an explicit mute range, or a video cut with optional scene snapping.
   from the scan and was verified exact to 0.0000s up to +250s, with a −45s shifted tag-set
   locating 5/5 through the full pipeline. The old `offsets.txt` notes were stale guesses
   and are no longer treated as data; the measurement comes from the files.
+- **…but the audio estimate can fail in a way no re-run fixes**, and then tagged video cuts
+  are refused. Severance S02E04 (prod run 61): drift was *bimodal* — one cluster near −90s,
+  another at +21..+95s — so `estimate()` reported "no reliable offset (5/18 tags agreed)",
+  the guard in `jobs.py` discarded five selected cuts, and the run finished having cut
+  nothing while reporting success. **Fix: anchor the offset on a credits marker by hand**
+  (Timeline offset in the filter dialog). Structural markers are hard boundaries the user
+  can read off the file, so they drift far less than a 6s-bucketed word tag. A manual
+  offset overrides the estimator *and* counts as a verified timeline, so cuts are applied.
+  Verified against the real tag-set: closing credits tagged 3054s (50:54), actually at
+  49:21 → −93s, and all five ranges then resolve. Two anchors disagreeing by >5s is
+  surfaced as a warning — that is the signal drift is not constant and no single offset
+  fits.
 - **A read-only media mount blocks runs.** The default archive path resolves under the
   media root, so filtering anything on the SMB share needs either a writable archive
   location in Settings or a writable share. The run fails loudly rather than producing a

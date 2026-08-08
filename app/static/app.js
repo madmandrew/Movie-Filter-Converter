@@ -704,6 +704,14 @@ async function openFilter(path, prefill = null) {
       </p>
       <div id="mgroups">${groupsHtml}</div>
     </fieldset>
+    <fieldset><legend>Timeline offset</legend>
+      <p class="muted">If the tag-set is keyed to a different cut, every time in it is
+        shifted. Words are found by listening, so audio survives that — but a video cut
+        can't be located in the file, so it's refused unless the offset is known.
+        Anchor it here: pick a credits marker, enter when it really starts in your file,
+        and the difference is applied to every tagged range.</p>
+      <div id="moffbody"><p class="muted">Pick a tag-set to set an offset.</p></div>
+    </fieldset>
     <fieldset><legend>VideoSkip filter file</legend>
       <div class="toolbar">
         <select id="mvsk"><option value="">none</option></select>
@@ -885,10 +893,140 @@ async function openFilter(path, prefill = null) {
     renderManual();
   });
 
+  /* --- timeline offset from a credits anchor ------------------------------ */
+  // The offset actually sent with the run. Null means "let the audio estimator decide",
+  // which is the historical behaviour and still the default.
+  let manualOffset = pf.manual_offset != null ? Number(pf.manual_offset) : null;
+
+  // Structural markers are the anchors: opening/closing credits are hard boundaries the
+  // user can read off the file directly, unlike a 6-second-bucketed word tag. The
+  // tag-set endpoint already flags them (`structural`), so no new parsing is needed.
+  const buildOffsetPanel = (ts, tsId) => {
+    const box = $('#moffbody');
+    if (!box) return;
+    const anchors = ts.groups.flatMap((g) => g.incidents
+      .filter((i) => i.structural)
+      .map((i) => ({ ...i, title: g.title, key: g.key })));
+
+    if (!anchors.length) {
+      box.innerHTML = `<p class="muted">This tag-set has no opening/closing credits
+        marker to anchor on. You can still enter an offset directly, or place video cuts
+        by hand under “Manual filters”.</p>
+        <label class="row"><span style="min-width:7rem">Offset</span>
+          <input id="moffraw" style="max-width:11rem" placeholder="e.g. -1:33"
+            value="${manualOffset != null ? tc(manualOffset) : ''}">
+          <span class="muted">added to every tagged time; negative = your file runs
+            earlier</span></label>
+        <div id="moffout" class="muted" style="margin-top:.4rem"></div>`;
+    } else {
+      box.innerHTML = `
+        <div class="anchorlist">
+          ${anchors.map((a, i) => `
+            <label class="row anchor-row">
+              <input type="checkbox" class="anchorbox" data-i="${i}"
+                     data-tagged="${a.start}">
+              <span style="min-width:12rem">${esc(a.title)}</span>
+              <span class="tcell">tagged ${tc(a.start)}</span>
+              <span>→ really at
+                <input class="anchorat" data-i="${i}" style="max-width:8rem"
+                       placeholder="mm:ss"></span>
+            </label>`).join('')}
+        </div>
+        <div id="moffout" class="muted" style="margin-top:.5rem"></div>`;
+    }
+
+    const out = $('#moffout');
+    // Recompute locally on every keystroke. The server endpoint does the same arithmetic
+    // and is what persists the value, but a round-trip per keystroke would make the
+    // readout lag behind the typing that produced it.
+    const recompute = () => {
+      const raw = $('#moffraw');
+      if (raw) {
+        const v = raw.value.trim();
+        manualOffset = v ? parseTime(v) : null;
+        out.innerHTML = manualOffset == null
+          ? 'No offset — the audio estimate will be used.'
+          : `<span class="pill ok">offset ${manualOffset >= 0 ? '+' : ''}${
+            manualOffset.toFixed(2)}s</span> applied to every tagged range.`;
+        return;
+      }
+      const used = $$('.anchorbox').filter((b) => b.checked).map((b) => {
+        const at = parseTime($(`.anchorat[data-i="${b.dataset.i}"]`).value);
+        return at == null ? null : {
+          label: anchors[Number(b.dataset.i)].title,
+          tagged: Number(b.dataset.tagged),
+          offset: at - Number(b.dataset.tagged),
+        };
+      }).filter(Boolean);
+
+      if (!used.length) {
+        manualOffset = null;
+        out.textContent = 'Tick a marker and enter its real time to set the offset. '
+          + 'Without one, the audio estimate is used — which is refused for video cuts '
+          + 'when the tags disagree.';
+        return;
+      }
+      const offs = used.map((u) => u.offset);
+      const spread = Math.max(...offs) - Math.min(...offs);
+      manualOffset = offs.reduce((a, b) => a + b, 0) / offs.length;
+      const detail = used.map((u) =>
+        `${esc(u.label)} ${u.offset >= 0 ? '+' : ''}${u.offset.toFixed(1)}s`).join(', ');
+      // Mirrors ANCHOR_DISAGREE_TOLERANCE on the server. Two anchors this far apart mean
+      // the drift is not constant, so no single offset fits the whole title — the same
+      // condition that defeats the audio estimator. Say so rather than quietly averaging.
+      out.innerHTML = spread > 5
+        ? `<span class="pill warn">anchors disagree by ${spread.toFixed(1)}s</span>
+           ${detail}. Drift isn't constant across this title, so no single offset fits.
+           Using the average (${manualOffset >= 0 ? '+' : ''}${manualOffset.toFixed(1)}s);
+           a cut far from either marker may be off by up to ${(spread / 2).toFixed(1)}s.
+           For accuracy, anchor on the marker nearest the cut.`
+        : `<span class="pill ok">offset ${manualOffset >= 0 ? '+' : ''}${
+          manualOffset.toFixed(2)}s</span> from ${detail}. Applied to every tagged range,
+          and video cuts will be allowed.`;
+    };
+
+    // Bound on the freshly-written subtree, not on `#moffbody` itself: that element
+    // survives a tag-set switch (only its innerHTML is replaced), so listeners attached
+    // to it would accumulate one copy per switch.
+    box.querySelectorAll('input').forEach((el) => {
+      el.addEventListener('input', recompute);
+      el.addEventListener('change', recompute);
+    });
+
+    // Rehydrate a saved offset, so reopening a title shows what it is already using
+    // rather than looking unset.
+    if (manualOffset != null && anchors.length) {
+      out.innerHTML = `<span class="pill ok">offset ${manualOffset >= 0 ? '+' : ''}${
+        manualOffset.toFixed(2)}s</span> saved for this title. Tick a marker above to
+        re-measure it.`;
+    } else {
+      recompute();
+    }
+  };
+
   const loadGroups = async (id) => {
-    if (!id) { $('#mgroups').innerHTML = groupsHtml; return; }
+    if (!id) {
+      $('#mgroups').innerHTML = groupsHtml;
+      $('#moffbody').innerHTML = '<p class="muted">Pick a tag-set to set an offset.</p>';
+      return;
+    }
     $('#mgroups').innerHTML = '<p class="muted">loading categories…</p>';
     const ts = await api(`/api/tagsets/${id}`);
+    // A saved offset only applies to the tag-set it was measured against — switching
+    // tag-sets must not silently carry a correction derived from another cut. So this
+    // always resolves to a value for *this* tag-set, and clears to null when there is
+    // none: an early return on a missing saved offset would leave the previous
+    // tag-set's number in place, which is the exact mistake the feature exists to stop.
+    if (pf.manual_offset != null && Number(id) === pf.tag_set_id) {
+      // Reopening the run that set it: the run's own value wins over the stored one.
+      manualOffset = Number(pf.manual_offset);
+    } else {
+      const saved = await api(
+        `/api/titles/offset?path=${encodeURIComponent(path)}&tag_set_id=${id}`)
+        .catch(() => ({ offset: null }));
+      manualOffset = saved.offset != null ? Number(saved.offset) : null;
+    }
+    buildOffsetPanel(ts, id);
     // Each incident is listed individually with its own description and timestamp.
     // A category checkbox alone hides the fact that "Sexually Suggestive" might be one
     // scene worth cutting and two worth keeping — the descriptions are the only way to
@@ -1077,6 +1215,8 @@ async function openFilter(path, prefill = null) {
         audio_refs: audioRefs,
         video_refs: videoRefs,
         quality: $('input[name=q]:checked').value,
+        // A hand-measured anchor. Null means the audio estimator decides, as before.
+        manual_offset: manualOffset,
         do_scan: $('#mscan').checked,
         // Free text, so split on commas/whitespace and drop the empties a trailing
         // comma leaves behind.

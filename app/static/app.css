@@ -325,6 +325,14 @@ pre.livelog { max-height: 380px; margin-top: .6rem; }
   min-width: 6.5rem;
 }
 .incident-row:hover { background: var(--panel-2); border-radius: 4px; }
+.anchor-row { align-items: center; gap: .5rem; padding: .28rem 0; flex-wrap: wrap; }
+.anchor-row .tcell {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: .88em;
+  white-space: nowrap;
+  min-width: 7.5rem;
+}
 @media (prefers-reduced-motion: reduce) {
   .catgroup > summary::before { transition: none; }
 }

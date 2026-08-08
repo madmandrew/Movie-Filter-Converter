@@ -527,6 +527,23 @@ def _execute(run_id: int) -> None:
     #: footage — measured on a real run: a -27s mismatch put an 18s cut 4s past the end
     #: of the content it was meant to remove.
     RUNTIME_TOLERANCE = 10.0
+
+    # A hand-measured offset, from the run options or saved on the title. This is an
+    # assertion by the user, not an inference, so it outranks whatever the audio estimator
+    # concludes — including the estimator's refusal to conclude anything.
+    #
+    # It exists because the audio estimate can fail in a way no re-run fixes. Measured on
+    # Severance S02E04: drift was bimodal (one cluster near -90s, another at +21..+95s),
+    # so `estimate()` reported "no reliable offset (5/18 tags agreed)", the video guard
+    # below then discarded five selected cuts, and the run completed having cut nothing.
+    # Anchoring on a structural marker — opening/closing credits — sidesteps that: those
+    # are hard boundaries the user can read off the file directly, and they drift far less
+    # than a 6-second-bucketed word tag.
+    manual_offset = opts.get("manual_offset")
+    if manual_offset is None and opts.get("tag_set_id"):
+        manual_offset = db_mod.get_manual_offset(title_path, opts.get("tag_set_id"))
+    manual_offset = None if manual_offset is None else float(manual_offset)
+
     if want_offset:
         _stage(run_id, "estimating source offset", 40)
         import offset as off_mod
@@ -545,6 +562,25 @@ def _execute(run_id: int) -> None:
         }
     else:
         report_offset = {}
+
+    if manual_offset is not None:
+        # Reported alongside the estimate rather than replacing it: seeing both is what
+        # tells you whether the anchor and the audio agree. On S02E04 they were close in
+        # the centre (-91.06s estimated vs -93s measured) and it was the *spread*, not the
+        # central value, that disqualified the estimate.
+        if report_offset:
+            _log(run_id, f"manual offset {manual_offset:+.3f}s overrides the audio "
+                         f"estimate ({report_offset['offset']:+.3f}s, "
+                         f"{'confident' if report_offset['confident'] else 'not confident'})")
+        else:
+            _log(run_id, f"manual offset {manual_offset:+.3f}s applied")
+        tag_offset = manual_offset
+        # `confident` is what the video guard below tests. A user-supplied anchor is an
+        # assertion about this file, so it satisfies that test — otherwise the cuts would
+        # still be discarded despite a perfectly good offset, which is the whole bug this
+        # feature exists to fix.
+        report_offset.update(manual=round(manual_offset, 3), confident=True,
+                             applied=round(manual_offset, 3), source="manual")
 
     trust_timestamps = bool(opts.get("trust_timestamps"))
 
@@ -1069,11 +1105,20 @@ def _execute(run_id: int) -> None:
             and not (report_offset or {}).get("confident")
         )
         if unverified:
+            # Point at the credits anchor first: it is the fix that actually applies the
+            # cuts the user selected. The other suggestions either re-run the estimator
+            # that just failed, or abandon the tag-set's ranges and re-enter them by hand.
+            measured = (report_offset or {}).get("offset")
             _log(run_id,
                  f"SKIPPING video cuts: the tag-set runtime differs from this file by "
-                 f"{delta:+.0f}s and no audio offset could be measured to correct it. "
-                 f"Video ranges cannot be located in the file, so cutting now would "
-                 f"remove the wrong footage. Enable the word-list scan or select audio "
+                 f"{delta:+.0f}s and no audio offset could be measured to correct it"
+                 + (f" (the estimate was {measured:+.1f}s but the tags disagreed too much "
+                    f"to trust it)" if measured else "")
+                 + f". Video ranges cannot be located in the file, so cutting now would "
+                 f"remove the wrong footage. Fix it by setting the offset from a credits "
+                 f"marker: open the filter dialog, expand \"Timeline offset\", pick the "
+                 f"opening or closing credits tag and enter the time it really starts in "
+                 f"this file. Alternatives: enable the word-list scan or select audio "
                  f"incidents so an offset can be derived, or add the cut manually.")
             want_tagged_video = False
 
