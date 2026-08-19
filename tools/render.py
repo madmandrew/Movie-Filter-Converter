@@ -281,9 +281,24 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
                     # without them the output audio has no `language` and is not
                     # `default`, and players then select no audio track at all. The file
                     # decodes perfectly and still presents as having lost its sound.
+                    # `-max_interleave_delta 0`: interleave strictly by timestamp.
+                    #
+                    # The spliced audio arrives as a raw elementary stream, so ffmpeg
+                    # cannot see how long it is and its default interleaving queue —
+                    # sized for streams whose durations are known — gives up and flushes
+                    # each stream in bulk instead. The output then stores ~37 minutes of
+                    # video before the matching audio (measured: worst A/V gap 2232s
+                    # against 0.42s in the source, runs of 55,799 consecutive video
+                    # packets). Every byte is present and every stream decodes, so no
+                    # duration, checksum or metadata check catches it — but a player has
+                    # to read gigabytes ahead to pair audio with video, so it buffers
+                    # forever. That is the "stuck spinning" symptom, and this flag is
+                    # what prevents it: measured 17.9s of seek time down to 2.5s, against
+                    # 2.4s for the untouched source.
                     _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src, "-i", audio,
                           "-map", "0:v", "-map", "1:a", "-map", "0:s?",
                           "-c", "copy",
+                          "-max_interleave_delta", "0",
                           *_audio_metadata_args(src, 1),
                           dest])
                     _assert_not_truncated(src, dest)
