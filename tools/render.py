@@ -284,8 +284,7 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
                     _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src, "-i", audio,
                           "-map", "0:v", "-map", "1:a", "-map", "0:s?",
                           "-c", "copy",
-                          "-map_metadata:s:a:0", "0:s:a:0",
-                          "-disposition:a:0", _disposition(src, "a:0"),
+                          *_audio_metadata_args(src, 1),
                           dest])
                     _assert_not_truncated(src, dest)
                     total = stats["bytes_reencoded"] + stats["bytes_copied"]
@@ -382,21 +381,52 @@ def _assert_not_truncated(src: str, dest: str) -> None:
             )
 
 
-def _audio_metadata_args(src: str, n_audio: int) -> list[str]:
-    """Restore language tags and dispositions onto filter-graph audio outputs.
+#: Stream tags worth carrying onto a rebuilt audio track. `language` is what players
+#: select on; `title` is what the user sees ("Commentary"). Everything else on these
+#: tracks is mkvmerge bookkeeping (BPS, NUMBER_OF_BYTES, _STATISTICS_*) that describes
+#: the *source* bytes and would be a lie on a re-encoded stream.
+_CARRIED_TAGS = ("language", "title")
 
-    A stream mapped from a `[fa0]` filter label is a *new* stream as far as the muxer is
-    concerned: it inherits neither the source's tags nor its dispositions. The result is
-    audio with no `language` and no `default` flag, which players read as "there is no
-    track worth selecting" — the file appears to have lost its audio entirely even though
-    every sample is present. Mapping straight from the input (`-map 0`) does not need
-    this; only the filter-graph paths do.
+
+def _audio_metadata_args(src: str, n_audio: int) -> list[str]:
+    """Restore language/title tags and dispositions onto rebuilt audio tracks.
+
+    A stream mapped from a `[fa0]` filter label — or from the spliced elementary stream —
+    is a *new* stream as far as the muxer is concerned: it inherits neither the source's
+    tags nor its dispositions. The result is audio with no `language` and no `default`
+    flag, which players read as "no track worth selecting", so the file presents as
+    having lost its audio even though every sample is present.
+
+    Set each tag directly with `-metadata:s:a:N`. The obvious-looking
+    `-map_metadata:s:a:N 0:s:a:N` is a trap: naming *any* per-stream metadata map
+    switches ffmpeg off its default of copying stream metadata, so every stream not
+    named — the video and all 34 subtitle tracks of a Clarkson's Farm episode — comes
+    out with no language at all. That shipped, and made the file unplayable rather than
+    merely silent. Setting the tag leaves the default copying alone.
     """
     args: list[str] = []
     for i in range(n_audio):
-        args += [f"-map_metadata:s:a:{i}", f"0:s:a:{i}",
-                 f"-disposition:a:{i}", _disposition(src, f"a:{i}")]
+        tags = _stream_tags(src, f"a:{i}")
+        for key in _CARRIED_TAGS:
+            if tags.get(key):
+                args += [f"-metadata:s:a:{i}", f"{key}={tags[key]}"]
+        args += [f"-disposition:a:{i}", _disposition(src, f"a:{i}")]
     return args
+
+
+def _stream_tags(src: str, stream: str) -> dict:
+    """Tags on `stream`, or an empty dict if it has none / cannot be read."""
+    out = _align.run_proc(
+        [_tool("ffprobe"), "-v", "error", "-select_streams", stream,
+         "-show_entries", "stream_tags", "-of", "json", "--", src],
+        capture_output=True, text=True,
+    ).stdout
+    import json as _json
+
+    try:
+        return _json.loads(out)["streams"][0].get("tags") or {}
+    except (ValueError, KeyError, IndexError):
+        return {}
 
 
 def _disposition(src: str, stream: str) -> str:
