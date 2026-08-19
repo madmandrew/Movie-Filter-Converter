@@ -37,8 +37,17 @@
       <span id="libstats" class="muted"></span>
     </div>
     <div id="afprogress" class="hidden"></div>
+    <div class="toolbar" id="bulkbar">
+      <button id="bulkrerun" disabled>Re-run <span id="bulkcount">0</span>
+        with last settings</button>
+      <button id="bulkclear" class="secondary" disabled>Clear selection</button>
+      <span class="muted">Tick the filtered titles to re-filter — each one re-runs with
+        the settings it last used. Shift-click to select a range.</span>
+    </div>
     <table id="titles">
       <thead><tr>
+        <th class="pickcol"><input type="checkbox" id="bulkall"
+          title="Select every filtered title listed"></th>
         <th>Title</th><th>Library</th><th>Size</th><th>Audio</th>
         <th>Filter</th><th>VidAngel</th><th></th>
       </tr></thead>

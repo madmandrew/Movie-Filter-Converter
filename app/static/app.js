@@ -196,7 +196,13 @@ async function loadLibrary() {
     const audio = t.audio_codec
       ? `${esc(t.audio_codec)}${t.channels ? ` ${t.channels}ch` : ''}`
       : '<span class="muted">—</span>';
+    // Only a title that has run before has settings to reuse. An unfiltered one has
+    // nothing to copy, so it gets no checkbox rather than a box that fails on click.
+    const rerunnable = t.status === 'filtered' || t.status === 'failed';
     return `<tr>
+      <td class="pickcol">${rerunnable
+        ? `<input type="checkbox" class="bulkbox" data-path="${esc(t.path)}">`
+        : ''}</td>
       <td class="name" title="${esc(t.path)}">${esc(t.name)}</td>
       <td class="muted">${esc(t.library)}</td>
       <td class="num">${t.size_gb} GB</td>
@@ -208,7 +214,7 @@ async function loadLibrary() {
       <td>${vidangelCell(t)}</td>
       <td><button data-path="${esc(t.path)}" class="filterbtn secondary">Filter…</button></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="7" class="muted">No titles. Try “Rescan library”.</td></tr>';
+  }).join('') || '<tr><td colspan="8" class="muted">No titles. Try “Rescan library”.</td></tr>';
 
   $$('.filterbtn').forEach((b) =>
     b.addEventListener('click', () => openFilter(b.dataset.path)));
@@ -236,7 +242,105 @@ async function loadLibrary() {
     b.addEventListener('click', () => openPicker(b.dataset.path)));
   $$('.histbtn').forEach((b) =>
     b.addEventListener('click', () => openHistory(b.dataset.path)));
+
+  wireBulkSelect();
 }
+
+/* ------------------------------------------------------- bulk re-run
+ *  Re-filtering a season is otherwise one trip through the history dialog per episode.
+ *  Selection lives here rather than in a module-level Set: the list is re-rendered on
+ *  every search and filter change, and a remembered selection would then queue titles
+ *  the user can no longer see. What is ticked on screen is what runs. */
+
+/** Checkboxes currently on screen, in display order. */
+const bulkBoxes = () => $$('.bulkbox');
+const bulkChecked = () => bulkBoxes().filter((b) => b.checked);
+
+/** The last box clicked without shift, i.e. the anchor a shift-click ranges from. */
+let bulkAnchor = null;
+
+function updateBulkBar() {
+  const n = bulkChecked().length;
+  $('#bulkcount').textContent = n;
+  $('#bulkrerun').disabled = !n;
+  $('#bulkclear').disabled = !n;
+  const boxes = bulkBoxes();
+  const all = $('#bulkall');
+  all.checked = boxes.length > 0 && n === boxes.length;
+  // Part-way through a season reads as neither on nor off.
+  all.indeterminate = n > 0 && n < boxes.length;
+}
+
+function wireBulkSelect() {
+  bulkBoxes().forEach((b) => b.addEventListener('click', (e) => {
+    // Shift-click fills in from the anchor, which is what makes "all of season 2" one
+    // gesture instead of ten. The clicked box's own state wins for the whole range.
+    if (e.shiftKey && bulkAnchor) {
+      const boxes = bulkBoxes();
+      const from = boxes.indexOf(bulkAnchor);
+      const to = boxes.indexOf(b);
+      if (from > -1 && to > -1) {
+        const [lo, hi] = from < to ? [from, to] : [to, from];
+        for (let i = lo; i <= hi; i++) boxes[i].checked = b.checked;
+      }
+    } else {
+      bulkAnchor = b;
+    }
+    updateBulkBar();
+  }));
+  updateBulkBar();
+}
+
+$('#bulkall').addEventListener('change', (e) => {
+  bulkBoxes().forEach((b) => { b.checked = e.target.checked; });
+  bulkAnchor = null;
+  updateBulkBar();
+});
+
+$('#bulkclear').addEventListener('click', () => {
+  bulkBoxes().forEach((b) => { b.checked = false; });
+  bulkAnchor = null;
+  updateBulkBar();
+});
+
+$('#bulkrerun').addEventListener('click', async () => {
+  const paths = bulkChecked().map((b) => b.dataset.path);
+  if (!paths.length) return;
+  // Re-filtering overwrites the library copy from the archive, so it is worth one
+  // confirmation — a mis-click here is a lot of GPU time and a lot of rewritten files.
+  const n = paths.length;
+  if (!await confirmDialog(
+    `Re-run ${n} title${n > 1 ? 's' : ''}?`,
+    `Each one re-runs with the settings it last used, filtering from its archived `
+    + `original and replacing the copy in the library.`,
+    { okText: `Queue ${n} run${n > 1 ? 's' : ''}` })) {
+    return;
+  }
+  const btn = $('#bulkrerun');
+  btn.disabled = true;
+  try {
+    const r = await postJSON('/api/runs/rerun-bulk', { paths });
+    const q = r.queued.length;
+    if (q) toast(`Queued ${q} run${q > 1 ? 's' : ''}.`, 'ok');
+    // Skips are the interesting half — silently queueing 8 of 10 is how a season comes
+    // back still half broken, so name what was left out and why.
+    if (r.skipped.length) {
+      toast(`${r.skipped.length} skipped — `
+        + r.skipped.map((s) => `${s.name}: ${s.reason}`).join('; '),
+        q ? 'warn' : 'error');
+    }
+    if (q) {
+      bulkBoxes().forEach((b) => { b.checked = false; });
+      bulkAnchor = null;
+      // Jump to the live view: the whole point is watching the batch work through.
+      $('.tab[data-view="live"]')?.click();
+    }
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    updateBulkBar();
+  }
+});
 
 /** VidAngel column: a cached tag-set, a known-negative answer, or a lookup control.
  *  Anything unresolved is clickable — an automatic answer that fell short is a starting

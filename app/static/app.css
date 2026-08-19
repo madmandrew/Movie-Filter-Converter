@@ -94,6 +94,10 @@ th { color: var(--muted); font-weight: 500; font-size: .85em; text-transform: up
 tbody tr:hover { background: var(--panel); }
 td.name { max-width: 44ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 td.num { font-variant-numeric: tabular-nums; }
+/* Bulk-select column. Fixed and narrow so ticking down a season is a straight line
+   rather than a column that drifts with the longest title. */
+.pickcol { width: 1.5rem; padding-right: 0; }
+.pickcol input { cursor: pointer; }
 
 .pill {
   display: inline-block;

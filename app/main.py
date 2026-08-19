@@ -1351,6 +1351,60 @@ def api_rerun(run_id: int):
     return {"run_id": new_id, "reused_from": run_id}
 
 
+class BulkRerunIn(BaseModel):
+    paths: list[str]
+
+
+@app.post("/api/runs/rerun-bulk")
+def api_rerun_bulk(body: BulkRerunIn):
+    """Re-queue several titles at once, each with its own last-used settings.
+
+    Re-filtering a whole season is otherwise a per-title chore: open the history, find
+    the last run, click re-run, repeat. This takes a list of titles and queues each one
+    with the settings *that title* last ran with — not one shared set of options, which
+    would quietly relicense a whole season to whatever the first episode happened to use.
+
+    Every path is reported individually and one bad path never sinks the batch. Skipping
+    beats failing here: a season where one episode's file was moved should still re-run
+    the other nine, and the caller gets told which one it left out and why.
+    """
+    conn = db.connect()
+    queued, skipped = [], []
+
+    # De-duplicated, but in the order given: the queue is FIFO, so the order the user
+    # selected episodes in is the order they get filtered.
+    seen: set[str] = set()
+    paths = [p for p in body.paths if not (p in seen or seen.add(p))]
+
+    for path in paths:
+        def skip(reason: str) -> None:
+            skipped.append({"path": path, "name": os.path.basename(path),
+                            "reason": reason})
+
+        if not library.within_roots(path):
+            skip("outside the configured library roots")
+            continue
+
+        row = conn.execute(
+            "SELECT id, options_json FROM runs WHERE path=? AND options_json IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (path,)).fetchone()
+        if not row:
+            skip("no previous run to copy settings from")
+            continue
+        if not os.path.exists(path):
+            skip("file is gone — restore it from the archive first")
+            continue
+
+        opts = _without_legacy_output(path, json.loads(row["options_json"] or "{}"))
+        if not opts.get("output_path"):
+            opts["output_path"] = path
+        queued.append({"path": path, "name": os.path.basename(path),
+                       "run_id": jobs.enqueue(path, opts), "reused_from": row["id"]})
+
+    return {"queued": queued, "skipped": skipped,
+            "queue_length": len(jobs.queued_order())}
+
+
 @app.post("/api/runs/{run_id}/cancel")
 def api_cancel(run_id: int):
     """Cancel a run, whether it is queued or already running.
