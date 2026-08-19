@@ -49,6 +49,25 @@ SPLICEABLE = {
     "aac": "aac",
 }
 
+#: Encoder to use when a *whole* track is re-encoded (`render._full_encode_args`).
+#:
+#: Deliberately separate from `SPLICEABLE`, which answers a stricter question: splicing
+#: additionally needs a fixed, known frame length so byte offsets can be computed, and
+#: only the codecs in `CODEC_FRAME_SAMPLES` have one. Opus is the case that separates
+#: them — it re-encodes to itself perfectly well, but its frames are variable-length, so
+#: it must never become spliceable by being listed here.
+#:
+#: A codec absent from this map falls through to FLAC, which is correct for genuinely
+#: lossless sources and wrong for everything else: Opus was missing, so every Opus file
+#: was inflated into FLAC (284 MB -> 927 MB on Better Call Saul S02E04) and broke
+#: playback on clients that cannot handle FLAC in Matroska.
+REENCODE_TO = {
+    **SPLICEABLE,
+    "opus": "libopus",
+    "vorbis": "libvorbis",
+    "mp3": "libmp3lame",
+}
+
 #: Profiles that are lossless or object-based; no encoder can reproduce them.
 _NO_ENCODER = ("dts-hd", "dts:x", "atmos", "truehd", "mlp")
 

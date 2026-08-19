@@ -275,9 +275,18 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
                     # place, so the spliced stream is exactly as long as the source, and
                     # `splice_audio` already refuses outright if it is not (see the length
                     # guard at the end of that function).
+                    #
+                    # The spliced track arrives as a raw elementary stream with no tags
+                    # and no dispositions, so the metadata args below are not cosmetic:
+                    # without them the output audio has no `language` and is not
+                    # `default`, and players then select no audio track at all. The file
+                    # decodes perfectly and still presents as having lost its sound.
                     _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src, "-i", audio,
                           "-map", "0:v", "-map", "1:a", "-map", "0:s?",
-                          "-c", "copy", dest])
+                          "-c", "copy",
+                          "-map_metadata:s:a:0", "0:s:a:0",
+                          "-disposition:a:0", _disposition(src, "a:0"),
+                          dest])
                     _assert_not_truncated(src, dest)
                     total = stats["bytes_reencoded"] + stats["bytes_copied"]
                     return {
@@ -317,7 +326,8 @@ def _render_audio_only(src, dest, mutes, spans, quality) -> dict:
         maps += ["-map", "0:s?"]
         _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src,
               "-filter_complex", chains, *maps,
-              "-c:v", "copy", *codec_args, "-c:s", "copy", dest])
+              "-c:v", "copy", *codec_args, "-c:s", "copy",
+              *_audio_metadata_args(src, n_audio), dest])
         note = f" ({n_audio} audio tracks, all filtered)"
 
     return {"mode": quality, "audio_tracks": n_audio,
@@ -372,6 +382,48 @@ def _assert_not_truncated(src: str, dest: str) -> None:
             )
 
 
+def _audio_metadata_args(src: str, n_audio: int) -> list[str]:
+    """Restore language tags and dispositions onto filter-graph audio outputs.
+
+    A stream mapped from a `[fa0]` filter label is a *new* stream as far as the muxer is
+    concerned: it inherits neither the source's tags nor its dispositions. The result is
+    audio with no `language` and no `default` flag, which players read as "there is no
+    track worth selecting" — the file appears to have lost its audio entirely even though
+    every sample is present. Mapping straight from the input (`-map 0`) does not need
+    this; only the filter-graph paths do.
+    """
+    args: list[str] = []
+    for i in range(n_audio):
+        args += [f"-map_metadata:s:a:{i}", f"0:s:a:{i}",
+                 f"-disposition:a:{i}", _disposition(src, f"a:{i}")]
+    return args
+
+
+def _disposition(src: str, stream: str) -> str:
+    """The disposition flags set on `stream`, as an ffmpeg `-disposition` value.
+
+    ffmpeg's default for a mapped stream is to *clear* every flag, so a track that was
+    `default` in the source silently stops being `default` in the output. Players use
+    that flag (with `language`) to choose a track, so losing it reads to the user as
+    "the audio is missing" even though the stream is present and decodes fine.
+
+    Returns "0" when nothing is set, which is ffmpeg's spelling for "no flags".
+    """
+    out = _align.run_proc(
+        [_tool("ffprobe"), "-v", "error", "-select_streams", stream,
+         "-show_entries", "stream_disposition", "-of", "json", "--", src],
+        capture_output=True, text=True,
+    ).stdout
+    import json as _json
+
+    try:
+        disp = _json.loads(out)["streams"][0]["disposition"]
+    except (ValueError, KeyError, IndexError):
+        return "default"  # the common case; better than clearing the flag outright
+    flags = [k for k, v in disp.items() if v]
+    return "+".join(flags) if flags else "0"
+
+
 def _audio_streams(src: str) -> list[dict]:
     """Per-stream codec/bitrate for every audio track."""
     out = _align.run_proc(
@@ -403,13 +455,23 @@ def _full_encode_args(src: str, quality: str) -> list[str]:
         lossless = codec in ("truehd", "mlp") or any(
             k in profile for k in sp._NO_ENCODER
         )
-        if quality == "lossless" or lossless or codec not in sp.SPLICEABLE:
+        # `REENCODE_TO`, not `SPLICEABLE`: a codec can be re-encodable to itself without
+        # being byte-spliceable. Gating on the stricter set sent Opus to FLAC, tripling
+        # the file size and breaking playback on clients that reject FLAC-in-Matroska.
+        if quality == "lossless" or lossless or codec not in sp.REENCODE_TO:
             args += [f"-c:a:{i}", "flac", f"-compression_level:a:{i}", "8"]
             continue
-        args += [f"-c:a:{i}", sp.SPLICEABLE[codec]]
+        args += [f"-c:a:{i}", sp.REENCODE_TO[codec]]
         br = st.get("bit_rate")
         if br and str(br).isdigit():
             args += [f"-b:a:{i}", str(br)]
+        elif codec == "opus":
+            # Matroska reports no per-stream bit_rate for Opus, and libopus without an
+            # explicit rate defaults to 96k/channel jammed to its own idea of stereo —
+            # an audible downgrade from a ~128k source. Ask for a sane rate per channel
+            # instead of letting the default decide.
+            ch = st.get("channels") or 2
+            args += [f"-b:a:{i}", str(64000 * int(ch))]
     return args
 
 
@@ -461,7 +523,8 @@ def _render_with_cuts(src, dest, mutes, cuts, quality) -> dict:
     venc = _video_encoder(src)
     _run([_tool("ffmpeg"), "-v", "error", "-y", "-i", src,
           "-filter_complex", ";".join(chains), *maps,
-          *venc, *codec_args, "-c:s", "copy", dest])
+          *venc, *codec_args, "-c:s", "copy",
+          *_audio_metadata_args(src, max(1, n_audio)), dest])
 
     removed = sum(c["end"] - c["start"] for c in cuts)
     return {
